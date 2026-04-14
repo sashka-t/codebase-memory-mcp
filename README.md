@@ -345,6 +345,50 @@ codebase-memory-mcp cli --raw search_graph '{"label": "Function"}' | jq '.result
 
 Layered: hardcoded patterns (`.git`, `node_modules`, etc.) → `.gitignore` hierarchy → `.cbmignore` (project-specific, gitignore syntax). Symlinks are always skipped.
 
+## Git Worktrees
+
+Git worktrees (`git worktree add`) let you check out multiple branches simultaneously into separate directories. codebase-memory-mcp treats each worktree as an independent project — index them individually using their directory path:
+
+```bash
+# Add a worktree for a feature branch
+git worktree add ../my-repo-feature feature/my-branch
+
+# Index the main working tree
+index_repository(repo_path="/path/to/my-repo")
+
+# Index the feature worktree as a separate project
+index_repository(repo_path="/path/to/my-repo-feature", project_name="my-repo-feature")
+```
+
+Or via CLI:
+
+```bash
+codebase-memory-mcp cli index_repository '{"repo_path": "/path/to/my-repo-feature", "project_name": "my-repo-feature"}'
+```
+
+**What works out of the box:**
+- `.gitignore` patterns are loaded correctly (in worktrees `.git` is a file, not a directory — the tool handles both)
+- `detect_changes` compares against the worktree's current branch
+- The background watcher tracks each worktree independently, polling for HEAD changes
+- Git history coupling (`FILE_CHANGES_WITH` edges) uses the shared commit history
+
+**Detecting changes in a worktree:**
+
+```
+detect_changes(project="my-repo-feature", base_branch="main")
+```
+
+Use the `since` parameter to scope changes to a time range or specific commit:
+
+```
+# Changes since a date
+detect_changes(project="my-repo-feature", since="2026-01-01")
+
+# Changes since a commit or tag
+detect_changes(project="my-repo-feature", since="HEAD~10")
+detect_changes(project="my-repo-feature", since="v1.2.0")
+```
+
 ## Configuration
 
 ```bash
@@ -399,6 +443,7 @@ SQLite databases stored at `~/.cache/codebase-memory-mcp/`. Persists across rest
 | Queries return wrong project results | Add `project="name"` parameter. Use `list_projects` to see names. |
 | Binary not found after install | Add to PATH: `export PATH="$HOME/.local/bin:$PATH"` |
 | UI not loading | Ensure you downloaded the `ui` variant and ran `--ui=true`. Check `http://localhost:9749`. |
+| Git worktree `.gitignore` not respected | Ensure you are on v0.6.1+. Older versions only loaded `.gitignore` when `.git` was a directory; worktrees use a `.git` file. |
 
 ## Language Support
 

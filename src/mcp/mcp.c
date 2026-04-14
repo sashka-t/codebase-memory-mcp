@@ -3083,6 +3083,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     char *project = cbm_mcp_get_string_arg(args, "project");
     char *base_branch = cbm_mcp_get_string_arg(args, "base_branch");
     char *scope = cbm_mcp_get_string_arg(args, "scope");
+    char *since = cbm_mcp_get_string_arg(args, "since");
     int depth = cbm_mcp_get_int_arg(args, "depth", MCP_DEFAULT_BFS_DEPTH);
 
     /* scope: "files" = just changed files, "symbols" = files + symbols (default) */
@@ -3097,7 +3098,17 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         free(project);
         free(base_branch);
         free(scope);
+        free(since);
         return cbm_mcp_text_result("base_branch contains invalid characters", true);
+    }
+
+    /* Reject shell metacharacters in user-supplied since ref */
+    if (since && !cbm_validate_shell_arg(since)) {
+        free(project);
+        free(base_branch);
+        free(scope);
+        free(since);
+        return cbm_mcp_text_result("since contains invalid characters", true);
     }
 
     char *root_path = get_project_root(srv, project);
@@ -3105,6 +3116,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         free(project);
         free(base_branch);
         free(scope);
+        free(since);
         return cbm_mcp_text_result("project not found", true);
     }
 
@@ -3113,8 +3125,19 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         free(project);
         free(base_branch);
         free(scope);
+        free(since);
         return cbm_mcp_text_result("project path contains invalid characters", true);
     }
+
+    /* Determine comparison base:
+     * 'since' takes priority over 'base_branch' when provided.
+     * ISO date strings (YYYY-MM-DD) use git log --since which understands
+     * dates natively.  All other values (branch names, tags, commit SHAs,
+     * relative refs like HEAD~5) are passed directly to git diff <ref>...HEAD.
+     * Works transparently inside git worktrees — git -C handles them natively. */
+    const char *base_ref = (since && since[0]) ? since : base_branch;
+    bool is_date = since && since[0] && strlen(since) == 10 &&
+                   since[4] == '-' && since[7] == '-';
 
     /* Get changed files via git (-C avoids cd + quoting issues on Windows) */
     char cmd[CBM_SZ_2K];
@@ -3122,12 +3145,21 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     snprintf(cmd, sizeof(cmd),
              "git -C \"%s\" diff --name-only \"%s\"...HEAD 2>NUL & "
              "git -C \"%s\" diff --name-only 2>NUL",
-             root_path, base_branch, root_path);
+             root_path, base_ref, root_path);
 #else
-    snprintf(cmd, sizeof(cmd),
-             "{ git -C '%s' diff --name-only '%s'...HEAD 2>/dev/null; "
-             "git -C '%s' diff --name-only 2>/dev/null; } | sort -u",
-             root_path, base_branch, root_path);
+    if (is_date) {
+        /* git log --since accepts ISO dates and outputs one file per line;
+         * empty lines between commits are harmless (skipped in the read loop) */
+        snprintf(cmd, sizeof(cmd),
+                 "{ git -C '%s' log --since='%s' --pretty=format: --name-only 2>/dev/null; "
+                 "git -C '%s' diff --name-only 2>/dev/null; } | sort -u",
+                 root_path, since, root_path);
+    } else {
+        snprintf(cmd, sizeof(cmd),
+                 "{ git -C '%s' diff --name-only '%s'...HEAD 2>/dev/null; "
+                 "git -C '%s' diff --name-only 2>/dev/null; } | sort -u",
+                 root_path, base_ref, root_path);
+    }
 #endif
 
     FILE *fp = cbm_popen(cmd, "r");
@@ -3136,6 +3168,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
         free(project);
         free(base_branch);
         free(scope);
+        free(since);
         return cbm_mcp_text_result("git diff failed", true);
     }
 
@@ -3181,6 +3214,7 @@ static char *handle_detect_changes(cbm_mcp_server_t *srv, const char *args) {
     free(project);
     free(base_branch);
     free(scope);
+    free(since);
 
     char *result = cbm_mcp_text_result(json, false);
     free(json);

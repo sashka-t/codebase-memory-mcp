@@ -478,12 +478,17 @@ int cbm_discover(const char *repo_path, const cbm_discover_opts_t *opts, cbm_fil
         return CBM_NOT_FOUND;
     }
 
-    /* Load gitignore if .git directory exists */
+    /* Load gitignore if this is a git repository root.
+     * Normal repos have .git as a directory; git worktrees have .git as a
+     * plain file (containing "gitdir: /path/to/main/.git/worktrees/<name>").
+     * In both cases the .gitignore lives in the worktree root, so the load
+     * path is the same — we only need to confirm .git exists at all. */
     cbm_gitignore_t *gitignore = NULL;
     char gi_path[CBM_SZ_4K];
     snprintf(gi_path, sizeof(gi_path), "%s/.git", repo_path);
     struct stat gi_stat;
-    if (stat(gi_path, &gi_stat) == 0 && S_ISDIR(gi_stat.st_mode)) {
+    if (stat(gi_path, &gi_stat) == 0 &&
+        (S_ISDIR(gi_stat.st_mode) || S_ISREG(gi_stat.st_mode))) {
         snprintf(gi_path, sizeof(gi_path), "%s/.gitignore", repo_path);
         gitignore = cbm_gitignore_load(gi_path);
     }
