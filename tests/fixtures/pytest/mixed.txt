@@ -1,0 +1,5 @@
+tests/unit/test_x.py::test_ok PASSED
+tests/unit/test_x.py::test_bad FAILED
+tests/unit/test_x.py::test_err ERROR
+tests/unit/test_x.py::test_sk SKIPPED
+=== 2 passed, 1 failed, 1 error, 1 skipped in 2.00s ===

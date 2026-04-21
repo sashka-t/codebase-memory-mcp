@@ -2,6 +2,7 @@
  * test_main.c — Test runner entry point for pure C rewrite.
  *
  * Includes all test suites and runs them sequentially.
+ * With -DCBM_TEST_FOUNDATION_ONLY, only foundation suites run (see Makefile.cbm test-foundation).
  */
 /* Global test counters (declared extern in test_framework.h) */
 int tf_pass_count = 0;
@@ -9,7 +10,9 @@ int tf_fail_count = 0;
 int tf_skip_count = 0;
 
 #include "test_framework.h"
+#ifndef CBM_TEST_FOUNDATION_ONLY
 #include <sqlite3.h>
+#endif
 
 /* Forward declarations of suite functions */
 extern void suite_arena(void);
@@ -19,6 +22,7 @@ extern void suite_str_intern(void);
 extern void suite_log(void);
 extern void suite_str_util(void);
 extern void suite_platform(void);
+#ifndef CBM_TEST_FOUNDATION_ONLY
 extern void suite_extraction(void);
 extern void suite_ac(void);
 extern void suite_store_nodes(void);
@@ -54,7 +58,15 @@ extern void suite_security(void);
 extern void suite_yaml(void);
 extern void suite_integration(void);
 extern void suite_incremental(void);
+extern void suite_test_ingest_integration(void);
 extern void suite_simhash(void);
+extern void suite_junit_xml(void);
+extern void suite_stdout_parsers(void);
+extern void suite_report_scan(void);
+extern void suite_test_graph(void);
+extern void suite_test_session(void);
+extern void suite_run_tests_exec(void);
+#endif
 
 int main(void) {
     printf("\n  codebase-memory-mcp  C test suite\n");
@@ -68,9 +80,18 @@ int main(void) {
     RUN_SUITE(str_util);
     RUN_SUITE(platform);
 
+#ifndef CBM_TEST_FOUNDATION_ONLY
     /* Existing C code regression tests */
     RUN_SUITE(ac);
     RUN_SUITE(extraction);
+
+    /* Test output ingestion (JUnit XML) */
+    RUN_SUITE(junit_xml);
+    RUN_SUITE(stdout_parsers);
+    RUN_SUITE(report_scan);
+    RUN_SUITE(test_graph);
+    RUN_SUITE(test_session);
+    RUN_SUITE(run_tests_exec);
 
     /* Store (M5) */
     RUN_SUITE(store_nodes);
@@ -151,8 +172,10 @@ int main(void) {
     /* Integration (end-to-end) */
     RUN_SUITE(integration);
     RUN_SUITE(incremental);
+    RUN_SUITE(test_ingest_integration);
 
     /* Release sqlite3 internal caches so ASan doesn't report them as leaks */
     sqlite3_shutdown();
+#endif
     TEST_SUMMARY();
 }

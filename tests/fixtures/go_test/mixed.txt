@@ -1,0 +1,9 @@
+=== RUN   TestPass
+--- PASS: TestPass (0.01s)
+=== RUN   TestFail
+--- FAIL: TestFail
+	want 1 got 2
+=== RUN   TestSkip
+--- SKIP: TestSkip (0.00s)
+FAIL
+FAIL	example.com/demo	0.050s

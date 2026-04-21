@@ -1,0 +1,6 @@
+[info] DemoSuite:
+[info]   okCase
+[info]   badCase
+[info]   - badCase *** FAILED ***
+[info]     expected 1
+[info] Tests: succeeded 1, failed 1, ignored 0

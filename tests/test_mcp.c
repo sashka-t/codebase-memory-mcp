@@ -8,6 +8,7 @@
 #include <mcp/mcp.h>
 #include <store/store.h>
 #include <yyjson/yyjson.h>
+#include <unistd.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -129,7 +130,7 @@ TEST(mcp_initialize_response) {
 TEST(mcp_tools_list) {
     char *json = cbm_mcp_tools_list();
     ASSERT_NOT_NULL(json);
-    /* Should contain all 14 tools */
+    /* Should contain all 19 tools */
     ASSERT_NOT_NULL(strstr(json, "index_repository"));
     ASSERT_NOT_NULL(strstr(json, "search_graph"));
     ASSERT_NOT_NULL(strstr(json, "query_graph"));
@@ -144,6 +145,11 @@ TEST(mcp_tools_list) {
     ASSERT_NOT_NULL(strstr(json, "detect_changes"));
     ASSERT_NOT_NULL(strstr(json, "manage_adr"));
     ASSERT_NOT_NULL(strstr(json, "ingest_traces"));
+    ASSERT_NOT_NULL(strstr(json, "run_tests"));
+    ASSERT_NOT_NULL(strstr(json, "ingest_test_reports"));
+    ASSERT_NOT_NULL(strstr(json, "query_test_results"));
+    ASSERT_NOT_NULL(strstr(json, "list_test_runs"));
+    ASSERT_NOT_NULL(strstr(json, "trace_test_failures"));
     free(json);
     PASS();
 }
@@ -318,6 +324,15 @@ TEST(server_handle_unknown_method) {
     ASSERT_NOT_NULL(strstr(resp, "-32601")); /* Method not found */
     free(resp);
 
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+
+
+TEST(mcp_server_test_sessions_new_free) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
     cbm_mcp_server_free(srv);
     PASS();
 }
@@ -703,6 +718,175 @@ TEST(tool_ingest_traces_empty) {
     ASSERT_NOT_NULL(strstr(resp, "accepted"));
     free(resp);
 
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
+
+TEST(tool_ingest_test_reports_and_query) {
+    char tmp_dir[256];
+    snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/cbm-ingest-query-XXXXXX");
+    if (!cbm_mkdtemp(tmp_dir)) {
+        PASS();
+    }
+    char rep[512];
+    snprintf(rep, sizeof(rep), "%s/xml", tmp_dir);
+    cbm_mkdir(rep);
+    char xmlp[512];
+    snprintf(xmlp, sizeof(xmlp), "%s/TEST.xml", rep);
+    FILE *fp = fopen(xmlp, "w");
+    ASSERT_NOT_NULL(fp);
+    fputs("<?xml version=\"1.0\"?>\n"
+          "<testsuite name=\"only.suite.Tests\" tests=\"1\" failures=\"0\" errors=\"0\" skipped=\"0\" "
+          "time=\"0.5\">\n"
+          "  <testcase classname=\"only.suite.Tests\" name=\"okCase\" time=\"0.5\"/>\n"
+          "</testsuite>\n",
+          fp);
+    fclose(fp);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+
+    char args[1536];
+    snprintf(args, sizeof(args),
+             "{\"cwd\":\"%s\",\"report_dir\":\"%s\",\"persist\":true,\"run_id\":\"mcp-ingest-query-1\"}",
+             tmp_dir, rep);
+
+    char *ing = cbm_mcp_handle_tool(srv, "ingest_test_reports", args);
+    ASSERT_NOT_NULL(ing);
+    ASSERT_NOT_NULL(strstr(ing, "mcp-ingest-query-1"));
+    ASSERT_NOT_NULL(strstr(ing, "total"));
+    ASSERT_NULL(strstr(ing, "\"isError\":true"));
+    free(ing);
+
+    char *q = cbm_mcp_handle_tool(srv, "query_test_results",
+                                  "{\"run_id\":\"mcp-ingest-query-1\",\"limit\":10}");
+    ASSERT_NOT_NULL(q);
+    ASSERT_NOT_NULL(strstr(q, "okCase"));
+    ASSERT_NOT_NULL(strstr(q, "only.suite.Tests"));
+    ASSERT_NOT_NULL(strstr(q, "passed"));
+    free(q);
+
+    cbm_mcp_server_free(srv);
+
+    remove(xmlp);
+    rmdir(rep);
+    rmdir(tmp_dir);
+    PASS();
+}
+
+
+TEST(tool_list_test_runs_and_trace_failures) {
+    char pname[64];
+    snprintf(pname, sizeof(pname), "mcp_tr_%ld", (long)getpid());
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(st);
+    ASSERT_EQ(cbm_store_upsert_project(st, pname, "/tmp/mcp_trace_root"), CBM_STORE_OK);
+
+    cbm_node_t nc = {0};
+    nc.project = pname;
+    nc.label = "Function";
+    nc.name = "Target";
+    nc.qualified_name = "demo.fn.Target";
+    nc.file_path = "callee.go";
+    nc.start_line = 1;
+    nc.end_line = 2;
+    nc.properties_json = "{}";
+    int64_t id_c = cbm_store_upsert_node(st, &nc);
+    ASSERT_TRUE(id_c > 0);
+
+    cbm_node_t nk = {0};
+    nk.project = pname;
+    nk.label = "Function";
+    nk.name = "Caller";
+    nk.qualified_name = "demo.pkg.Caller";
+    nk.file_path = "caller.go";
+    nk.start_line = 3;
+    nk.end_line = 4;
+    nk.properties_json = "{}";
+    int64_t id_k = cbm_store_upsert_node(st, &nk);
+    ASSERT_TRUE(id_k > 0);
+
+    cbm_edge_t ce = {0};
+    ce.project = pname;
+    ce.source_id = id_k;
+    ce.target_id = id_c;
+    ce.type = "CALLS";
+    ce.properties_json = "{}";
+    ASSERT_TRUE(cbm_store_insert_edge(st, &ce) > 0);
+
+    char tmp_dir[256];
+    snprintf(tmp_dir, sizeof(tmp_dir), "/tmp/cbm-trace-ltrtf-XXXXXX");
+    if (!cbm_mkdtemp(tmp_dir)) {
+        cbm_mcp_server_free(srv);
+        PASS();
+    }
+    char rep[512];
+    snprintf(rep, sizeof(rep), "%s/xml", tmp_dir);
+    cbm_mkdir(rep);
+    char xmlp[512];
+    snprintf(xmlp, sizeof(xmlp), "%s/TEST.xml", rep);
+    FILE *fp = fopen(xmlp, "w");
+    ASSERT_NOT_NULL(fp);
+    fputs("<?xml version=\"1.0\"?>\n"
+          "<testsuite name=\"demo.suite\" tests=\"1\" failures=\"1\" errors=\"0\" skipped=\"0\" "
+          "time=\"0.5\">\n"
+          "  <testcase classname=\"demo.fn.Target\" name=\"broke\" time=\"0.1\">\n"
+          "    <failure message=\"boom\">boom</failure>\n"
+          "  </testcase>\n"
+          "</testsuite>\n",
+          fp);
+    fclose(fp);
+
+    char args[2048];
+    snprintf(args, sizeof(args),
+             "{\"cwd\":\"%s\",\"report_dir\":\"%s\",\"persist\":true,\"run_id\":\"ltrtf-1\",\"project\":\"%s\"}",
+             tmp_dir, rep, pname);
+
+    char *ing = cbm_mcp_handle_tool(srv, "ingest_test_reports", args);
+    ASSERT_NOT_NULL(ing);
+    ASSERT_NULL(strstr(ing, "\"isError\":true"));
+    ASSERT_NOT_NULL(strstr(ing, "ltrtf-1"));
+    free(ing);
+
+    char *list = cbm_mcp_handle_tool(srv, "list_test_runs", "{}");
+    ASSERT_NOT_NULL(list);
+    ASSERT_NOT_NULL(strstr(list, "ltrtf-1"));
+    ASSERT_NOT_NULL(strstr(list, "failed"));
+    free(list);
+
+    char targs[1024];
+    snprintf(targs, sizeof(targs),
+             "{\"run_id\":\"ltrtf-1\",\"project\":\"%s\",\"depth\":4}", pname);
+    char *tr = cbm_mcp_handle_tool(srv, "trace_test_failures", targs);
+    ASSERT_NOT_NULL(tr);
+    ASSERT_NULL(strstr(tr, "\"isError\":true"));
+    ASSERT_NOT_NULL(strstr(tr, "demo.fn.Target"));
+    ASSERT_NOT_NULL(strstr(tr, "Caller"));
+    ASSERT_NOT_NULL(strstr(tr, "callers"));
+    free(tr);
+
+    cbm_mcp_server_free(srv);
+
+    remove(xmlp);
+    rmdir(rep);
+    rmdir(tmp_dir);
+
+
+    PASS();
+}
+
+TEST(tool_run_tests_invalid_command) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
+    ASSERT_NOT_NULL(srv);
+    char *r = cbm_mcp_handle_tool(srv, "run_tests", "{\"command\":\"rm -rf /\",\"cwd\":\"/tmp\"}");
+    ASSERT_NOT_NULL(r);
+    ASSERT_NOT_NULL(strstr(r, "invalid_command"));
+    ASSERT_NOT_NULL(strstr(r, "\"isError\":true"));
+    free(r);
     cbm_mcp_server_free(srv);
     PASS();
 }
@@ -1684,6 +1868,7 @@ SUITE(mcp) {
     RUN_TEST(server_handle_initialized_notification);
     RUN_TEST(server_handle_tools_list);
     RUN_TEST(server_handle_unknown_method);
+    RUN_TEST(mcp_server_test_sessions_new_free);
 
     /* Server handle — edge cases */
     RUN_TEST(server_handle_invalid_json);
@@ -1716,6 +1901,9 @@ SUITE(mcp) {
     RUN_TEST(tool_manage_adr_get_with_existing_adr);
     RUN_TEST(tool_ingest_traces_basic);
     RUN_TEST(tool_ingest_traces_empty);
+    RUN_TEST(tool_ingest_test_reports_and_query);
+    RUN_TEST(tool_list_test_runs_and_trace_failures);
+    RUN_TEST(tool_run_tests_invalid_command);
 
     /* Idle store eviction */
     RUN_TEST(store_idle_eviction);

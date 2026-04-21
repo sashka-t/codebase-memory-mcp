@@ -568,7 +568,7 @@ TEST(cli_skill_files_content) {
     /* Reference capabilities */
     ASSERT(strstr(sk[0].content, "query_graph") != NULL);
     ASSERT(strstr(sk[0].content, "Cypher") != NULL);
-    ASSERT(strstr(sk[0].content, "14 MCP Tools") != NULL);
+    ASSERT(strstr(sk[0].content, "19 MCP Tools") != NULL);
 
     /* Gotchas section */
     ASSERT(strstr(sk[0].content, "Gotchas") != NULL);
@@ -1495,6 +1495,51 @@ TEST(cli_detect_agents_finds_kilocode) {
     PASS();
 }
 
+TEST(cli_detect_agents_finds_jetbrains) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-jetbrains-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        SKIP("cbm_mkdtemp failed");
+
+    char dir[512];
+#ifdef __APPLE__
+    snprintf(dir, sizeof(dir),
+             "%s/Library/Application Support/JetBrains/IntelliJIdea2026.1/options", tmpdir);
+#elif defined(_WIN32)
+    test_rmdir_r(tmpdir);
+    SKIP("JetBrains detection not implemented on Windows");
+#else
+    snprintf(dir, sizeof(dir), "%s/.config/JetBrains/IntelliJIdea2026.1/options", tmpdir);
+#endif
+#ifndef _WIN32
+    test_mkdirp(dir);
+
+    cbm_detected_agents_t agents = cbm_detect_agents(tmpdir);
+    ASSERT_TRUE(agents.jetbrains);
+
+    char jetbrains_dir[512];
+#ifdef __APPLE__
+    snprintf(jetbrains_dir, sizeof(jetbrains_dir),
+             "%s/Library/Application Support/JetBrains/IntelliJIdea2026.1", tmpdir);
+#else
+    snprintf(jetbrains_dir, sizeof(jetbrains_dir), "%s/.config/JetBrains/IntelliJIdea2026.1", tmpdir);
+#endif
+    int rc = cbm_install_jetbrains_mcp("/usr/local/bin/codebase-memory-mcp", jetbrains_dir);
+    ASSERT_EQ(rc, 0);
+
+    char configpath[512];
+    snprintf(configpath, sizeof(configpath), "%s/options/mcp.json", jetbrains_dir);
+    const char *data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "mcpServers") != NULL);
+    ASSERT(strstr(data, "codebase-memory-mcp") != NULL);
+    ASSERT(strstr(data, "/usr/local/bin/codebase-memory-mcp") != NULL);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+#endif
+}
+
 TEST(cli_detect_agents_none_found) {
     char tmpdir[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-detect-XXXXXX");
@@ -1511,6 +1556,7 @@ TEST(cli_detect_agents_none_found) {
     ASSERT_FALSE(agents.zed);
     ASSERT_FALSE(agents.antigravity);
     ASSERT_FALSE(agents.kilocode);
+    ASSERT_FALSE(agents.jetbrains);
 
     rmdir(tmpdir);
     PASS();
@@ -2418,13 +2464,14 @@ SUITE(cli) {
     RUN_TEST(cli_yaml_parse_empty);
     RUN_TEST(cli_yaml_has);
 
-    /* Agent detection (6 tests — group A) */
+    /* Agent detection (7 tests — group A) */
     RUN_TEST(cli_detect_agents_finds_claude);
     RUN_TEST(cli_detect_agents_finds_codex);
     RUN_TEST(cli_detect_agents_finds_gemini);
     RUN_TEST(cli_detect_agents_finds_zed);
     RUN_TEST(cli_detect_agents_finds_antigravity);
     RUN_TEST(cli_detect_agents_finds_kilocode);
+    RUN_TEST(cli_detect_agents_finds_jetbrains);
     RUN_TEST(cli_detect_agents_none_found);
 
     /* Codex MCP config upsert (3 tests — group B) */

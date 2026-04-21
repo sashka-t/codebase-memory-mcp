@@ -1,5 +1,5 @@
 /*
- * mcp.c — MCP server: JSON-RPC 2.0 over stdio with 14 graph tools.
+ * mcp.c — MCP server: JSON-RPC 2.0 over stdio with 19 graph tools.
  *
  * Uses yyjson for fast JSON parsing/building.
  * Single-threaded event loop: read line → parse → dispatch → respond.
@@ -53,6 +53,8 @@ enum {
 #include "foundation/compat_thread.h"
 #include "foundation/log.h"
 #include "foundation/str_util.h"
+#include "foundation/hash_table.h"
+#include "test_ingest/test_session.h"
 #include "foundation/compat_regex.h"
 
 #ifdef _WIN32
@@ -384,6 +386,60 @@ static const tool_def_t TOOLS[] = {
      "{\"type\":\"object\",\"properties\":{\"traces\":{\"type\":\"array\",\"items\":{\"type\":"
      "\"object\"}},\"project\":{\"type\":"
      "\"string\"}},\"required\":[\"traces\",\"project\"]}"},
+
+    {"run_tests",
+     "Run a whitelisted test command (gradle, ./gradlew, mvn, go test, pytest, sbt), parse "
+     "results into a knowledge graph, and return a summary. Set run_id or persist=true to keep "
+     "results for follow-up queries.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"command\":{\"type\":\"string\",\"description\":\"Full test command. Must begin with: "
+     "gradle, ./gradlew, mvn, go test, pytest, or sbt.\"},"
+     "\"cwd\":{\"type\":\"string\",\"description\":\"Working directory. Must pass cbm_validate_shell_arg.\"},"
+     "\"project\":{\"type\":\"string\",\"description\":\"Project name for TESTS edge cross-reference. Optional.\"},"
+     "\"run_id\":{\"type\":\"string\"},"
+     "\"persist\":{\"type\":\"boolean\",\"description\":\"If true and run_id is omitted, server generates a timestamp-based run_id. Default false.\"},"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"auto\",\"junit_xml\",\"go_test\",\"pytest\",\"sbt\"]},"
+     "\"timeout_seconds\":{\"type\":\"integer\",\"description\":\"Kill runner after N seconds. Default 600.\"}"
+     "},\"required\":[\"command\",\"cwd\"]}"},
+
+    {"ingest_test_reports",
+     "Parse existing JUnit XML test reports from disk (Gradle/Maven/sbt/IntelliJ). Auto-scans "
+     "standard directories under cwd unless report_dir is specified.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"cwd\":{\"type\":\"string\"},"
+     "\"project\":{\"type\":\"string\"},"
+     "\"run_id\":{\"type\":\"string\"},"
+     "\"persist\":{\"type\":\"boolean\"},"
+     "\"report_dir\":{\"type\":\"string\",\"description\":\"Override auto-scan. Parses all *.xml files under this directory.\"},"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"auto\",\"junit_xml\",\"go_test\",\"pytest\",\"sbt\"]}"
+     "},\"required\":[\"cwd\"]}"},
+
+    {"query_test_results",
+     "Query a persisted test run. Returns matching test cases filtered by status, name, and/or "
+     "suite regex.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"run_id\":{\"type\":\"string\"},"
+     "\"status\":{\"type\":\"string\",\"enum\":[\"passed\",\"failed\",\"skipped\",\"error\"]},"
+     "\"name_pattern\":{\"type\":\"string\"},"
+     "\"suite_pattern\":{\"type\":\"string\"},"
+     "\"limit\":{\"type\":\"integer\"},"
+     "\"offset\":{\"type\":\"integer\"}"
+     "},\"required\":[\"run_id\"]}"},
+    {"list_test_runs",
+     "List persistent test runs held in the server session, optionally filtered by project.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"project\":{\"type\":\"string\"}"
+     "}}"},
+
+    {"trace_test_failures",
+     "For each failed/errored test in a run, resolve related production functions via TESTS edges "
+     "and return inbound CALLS callers up to depth.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"run_id\":{\"type\":\"string\"},"
+     "\"project\":{\"type\":\"string\"},"
+     "\"depth\":{\"type\":\"integer\",\"description\":\"Caller BFS depth. Default 2.\"},"
+     "\"include_errors\":{\"type\":\"boolean\",\"description\":\"Include status=error. Default true.\"}"
+     "},\"required\":[\"run_id\",\"project\"]}"},
 };
 
 static const int TOOL_COUNT = sizeof(TOOLS) / sizeof(TOOLS[0]);
@@ -573,7 +629,59 @@ struct cbm_mcp_server {
     struct cbm_config *config;        /* external config ref (not owned) */
     cbm_thread_t autoindex_tid;
     bool autoindex_active; /* true if auto-index thread was started */
+
+    CBMHashTable *test_sessions; /* run_id -> cbm_test_session_t* */
 };
+
+
+
+/* ── Test run sessions (Task 8) ─────────────────────────────────── */
+
+typedef struct {
+    const char **keys;
+    size_t count;
+    size_t cap;
+} mcp_ts_keys_t;
+
+static void mcp_collect_ts_keys(const char *key, void *value, void *userdata) {
+    mcp_ts_keys_t *c = userdata;
+    (void)value;
+    if (c->count == c->cap) {
+        size_t ncap = c->cap ? c->cap * (size_t)CBM_SZ_2 : (size_t)CBM_SZ_16;
+        void *p = realloc(c->keys, ncap * sizeof(*c->keys));
+        if (!p) {
+            return;
+        }
+        c->keys = p;
+        c->cap = ncap;
+    }
+    c->keys[c->count++] = key;
+}
+
+static void mcp_free_all_test_sessions(CBMHashTable *ht) {
+    if (!ht) {
+        return;
+    }
+    mcp_ts_keys_t c = {0};
+    cbm_ht_foreach(ht, mcp_collect_ts_keys, &c);
+    for (size_t i = 0; i < c.count; i++) {
+        void *removed = cbm_ht_delete(ht, c.keys[i]);
+        cbm_test_session_free(removed);
+    }
+    free(c.keys);
+    cbm_ht_free(ht);
+}
+
+/* Called at the top of each test-related MCP tool handler (Task 9). */
+#ifdef __GNUC__
+__attribute__((unused))
+#endif
+static void test_sessions_evict(cbm_mcp_server_t *srv) {
+    if (!srv || !srv->test_sessions) {
+        return;
+    }
+    cbm_test_sessions_evict_expired(srv->test_sessions, time(NULL));
+}
 
 cbm_mcp_server_t *cbm_mcp_server_new(const char *store_path) {
     cbm_mcp_server_t *srv = calloc(CBM_ALLOC_ONE, sizeof(*srv));
@@ -590,6 +698,16 @@ cbm_mcp_server_t *cbm_mcp_server_new(const char *store_path) {
         srv->store = cbm_store_open_memory();
     }
     srv->owns_store = true;
+
+    srv->test_sessions = cbm_ht_create((uint32_t)CBM_SZ_16);
+    if (!srv->test_sessions) {
+        if (srv->owns_store && srv->store) {
+            cbm_store_close(srv->store);
+        }
+        free(srv->current_project);
+        free(srv);
+        return NULL;
+    }
 
     return srv;
 }
@@ -628,6 +746,8 @@ void cbm_mcp_server_free(cbm_mcp_server_t *srv) {
     if (srv->autoindex_active) {
         cbm_thread_join(&srv->autoindex_tid);
     }
+    mcp_free_all_test_sessions(srv->test_sessions);
+    srv->test_sessions = NULL;
     if (srv->owns_store && srv->store) {
         cbm_store_close(srv->store);
     }
@@ -3367,6 +3487,8 @@ static char *handle_ingest_traces(cbm_mcp_server_t *srv, const char *args) {
     return result;
 }
 
+#include "mcp/mcp_test_tools.inc"
+
 /* ── Tool dispatch ────────────────────────────────────────────── */
 
 char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const char *args_json) {
@@ -3417,6 +3539,21 @@ char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const ch
     }
     if (strcmp(tool_name, "ingest_traces") == 0) {
         return handle_ingest_traces(srv, args_json);
+    }
+    if (strcmp(tool_name, "run_tests") == 0) {
+        return handle_run_tests(srv, args_json);
+    }
+    if (strcmp(tool_name, "ingest_test_reports") == 0) {
+        return handle_ingest_test_reports(srv, args_json);
+    }
+    if (strcmp(tool_name, "query_test_results") == 0) {
+        return handle_query_test_results(srv, args_json);
+    }
+    if (strcmp(tool_name, "list_test_runs") == 0) {
+        return handle_list_test_runs(srv, args_json);
+    }
+    if (strcmp(tool_name, "trace_test_failures") == 0) {
+        return handle_trace_test_failures(srv, args_json);
     }
     char msg[CBM_SZ_256];
     snprintf(msg, sizeof(msg), "unknown tool: %s", tool_name);

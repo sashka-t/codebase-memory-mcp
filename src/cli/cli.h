@@ -106,6 +106,14 @@ int cbm_install_zed_mcp(const char *binary_path, const char *config_path);
  * Returns 0 on success. */
 int cbm_remove_zed_mcp(const char *config_path);
 
+/* Install MCP server entry in JetBrains options/mcp.json.
+ * Writes to <jetbrains_config_dir>/options/mcp.json. */
+int cbm_install_jetbrains_mcp(const char *binary_path, const char *jetbrains_config_dir);
+
+/* Remove MCP server entry from JetBrains options/mcp.json.
+ * Writes to <jetbrains_config_dir>/options/mcp.json. */
+int cbm_remove_jetbrains_mcp(const char *jetbrains_config_dir);
+
 /* ── Agent detection ──────────────────────────────────────────── */
 
 /* Detected coding agents on the system. */
@@ -120,6 +128,7 @@ typedef struct {
     bool kilocode;    /* KiloCode globalStorage dir exists */
     bool vscode;      /* VS Code User config dir exists */
     bool openclaw;    /* ~/.openclaw/ exists */
+    bool jetbrains;   /* JetBrains config dir exists */
 } cbm_detected_agents_t;
 
 /* Detect which coding agents are installed.

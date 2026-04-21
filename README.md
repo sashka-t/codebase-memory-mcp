@@ -3,7 +3,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/DeusData/codebase-memory-mcp?style=flat&color=blue)](https://github.com/DeusData/codebase-memory-mcp/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/DeusData/codebase-memory-mcp/dry-run.yml?label=CI)](https://github.com/DeusData/codebase-memory-mcp/actions/workflows/dry-run.yml)
-[![Tests](https://img.shields.io/badge/tests-2586_passing-brightgreen)](https://github.com/DeusData/codebase-memory-mcp)
+[![Tests](https://img.shields.io/badge/tests-2745_passing-brightgreen)](https://github.com/DeusData/codebase-memory-mcp)
 [![Languages](https://img.shields.io/badge/languages-66-orange)](https://github.com/DeusData/codebase-memory-mcp)
 [![Agents](https://img.shields.io/badge/agents-10-purple)](https://github.com/DeusData/codebase-memory-mcp)
 [![Pure C](https://img.shields.io/badge/pure_C-zero_dependencies-blue)](https://github.com/DeusData/codebase-memory-mcp)
@@ -15,7 +15,7 @@
 
 **The fastest and most efficient code intelligence engine for AI coding agents.** Full-indexes an average repository in milliseconds, the Linux kernel (28M LOC, 75K files) in 3 minutes. Answers structural queries in under 1ms. Ships as a single static binary for macOS, Linux, and Windows — download, run `install`, done.
 
-High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-sitter/) AST analysis across all 66 languages, enhanced with LSP-style hybrid type resolution for Go, C, and C++ (more languages coming soon) — producing a persistent knowledge graph of functions, classes, call chains, HTTP routes, and cross-service links. 14 MCP tools. Zero dependencies. Plug and play across 10 coding agents.
+High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-sitter/) AST analysis across all 66 languages, enhanced with LSP-style hybrid type resolution for Go, C, and C++ (more languages coming soon) — producing a persistent knowledge graph of functions, classes, call chains, HTTP routes, and cross-service links. 19 MCP tools. Zero dependencies. Plug and play across 10 coding agents plus JetBrains IDEs.
 
 > **Research** — The design and benchmarks behind this project are described in the preprint [*Codebase-Memory: Tree-Sitter-Based Knowledge Graphs for LLM Code Exploration via MCP*](https://arxiv.org/abs/2603.27277) (arXiv:2603.27277). Evaluated across 31 real-world repositories: 83% answer quality, 10× fewer tokens, 2.1× fewer tool calls vs. file-by-file exploration.
 
@@ -33,10 +33,10 @@ High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-si
 - **Plug and play** — single static binary for macOS (arm64/amd64), Linux (arm64/amd64), and Windows (amd64). No Docker, no runtime dependencies, no API keys. Download → `install` → restart agent → done.
 - **66 languages** — vendored tree-sitter grammars compiled into the binary. Nothing to install, nothing that breaks.
 - **120x fewer tokens** — 5 structural queries: ~3,400 tokens vs ~412,000 via file-by-file search. One graph query replaces dozens of grep/read cycles.
-- **10 agents, one command** — `install` auto-detects Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity, Aider, KiloCode, VS Code, and OpenClaw — configures MCP entries, instruction files, and pre-tool hooks for each.
+- **Agents and IDEs, one command** — `install` auto-detects Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity, Aider, KiloCode, VS Code, OpenClaw, and JetBrains IDEs (IntelliJ IDEA, CLion, PyCharm, GoLand, WebStorm, Rider) — configures MCP entries, instruction files, and pre-tool hooks where supported.
 - **Built-in graph visualization** — 3D interactive UI at `localhost:9749` (optional UI binary variant).
 - **Infrastructure-as-code indexing** — Dockerfiles, Kubernetes manifests, and Kustomize overlays indexed as graph nodes with cross-references. `Resource` nodes for K8s kinds, `Module` nodes for Kustomize overlays with `IMPORTS` edges to referenced resources.
-- **14 MCP tools** — search, trace, architecture, impact analysis, Cypher queries, dead code detection, cross-service HTTP linking, ADR management, and more.
+- **19 MCP tools** — graph search/trace, Cypher, change impact, ADRs, runtime traces, and **test runs / JUnit ingestion / failure tracing** — all in one binary.
 
 ## Quick Start
 
@@ -93,7 +93,7 @@ Restart your coding agent. Say **"Index this project"** — done.
 The `install` command automatically strips macOS quarantine attributes and ad-hoc signs the binary — no manual `xattr`/`codesign` needed.
 </details>
 
-The `install` command auto-detects all installed coding agents and configures MCP server entries, instruction files, skills, and pre-tool hooks for each.
+The `install` command auto-detects installed coding agents and supported JetBrains IDEs, then configures MCP server entries, instruction files, skills, and pre-tool hooks where available.
 
 ### Graph Visualization UI
 
@@ -153,7 +153,7 @@ codebase-memory-mcp is a **structural analysis backend** — it builds and queri
 ```
 You: "what calls ProcessOrder?"
 
-Agent calls: trace_call_path(function_name="ProcessOrder", direction="inbound")
+Agent calls: trace_path(function_name="ProcessOrder", direction="inbound")
 
 codebase-memory-mcp: executes graph query, returns structured results
 
@@ -243,6 +243,31 @@ scripts/build.sh --with-ui          # with graph visualization
 # Binary at: build/c/codebase-memory-mcp
 ```
 
+**Wire MCP to a stable path:** running **`./build/c/codebase-memory-mcp install`** (after build) copies the binary to **`~/.local/bin/codebase-memory-mcp`**, then writes MCP configs with that absolute path — so agents do not keep pointing at a transient `build/c/...` location.
+
+To copy the binary yourself (then run `install` for skills/hooks, or edit MCP by hand):
+
+```bash
+mkdir -p ~/.local/bin
+cp build/c/codebase-memory-mcp ~/.local/bin/
+chmod +x ~/.local/bin/codebase-memory-mcp
+```
+
+### Help commands (macOS: clean cache, install binary, index current repo)
+
+From the repository root (after `scripts/build.sh` or `make -f Makefile.cbm cbm`). Resets the on-disk index cache, copies your **local build** into `~/.local/bin`, applies Gatekeeper-friendly signing, runs `install`, then indexes the current working tree. Set `BRANCH` so the project name is unique per git branch (same idea as `project_name` in the worktree examples below).
+
+```bash
+rm -rf ~/.cache/codebase-memory-mcp
+mkdir -p ~/.cache/codebase-memory-mcp
+cp build/c/codebase-memory-mcp ~/.local/bin/codebase-memory-mcp
+codesign --sign - --force ~/.local/bin/codebase-memory-mcp
+xattr -d com.apple.quarantine ~/.local/bin/codebase-memory-mcp 2>/dev/null || true
+codebase-memory-mcp install
+BRANCH=$(git branch --show-current)
+codebase-memory-mcp cli index_repository '{"repo_path": "'$(pwd)'", "project_name": "repo-'"$BRANCH"'"}'
+```
+
 ### Manual MCP Configuration
 
 <details>
@@ -254,14 +279,14 @@ Add to `~/.claude/.mcp.json` (global) or project `.mcp.json`:
 {
   "mcpServers": {
     "codebase-memory-mcp": {
-      "command": "/path/to/codebase-memory-mcp",
+      "command": "/path/to/.local/bin/codebase-memory-mcp",
       "args": []
     }
   }
 }
 ```
 
-Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` with 14 tools.
+Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` with 19 tools.
 
 </details>
 
@@ -281,6 +306,12 @@ Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` 
 | KiloCode | `mcp_settings.json` | `~/.kilocode/rules/` | — |
 | VS Code | `Code/User/mcp.json` | — | — |
 | OpenClaw | `openclaw.json` | — | — |
+| IntelliJ IDEA | `JetBrains/IntelliJIdea*/options/mcp.json` | — | — |
+| CLion | `JetBrains/CLion*/options/mcp.json` | — | — |
+| PyCharm | `JetBrains/PyCharm*/options/mcp.json` | — | — |
+| GoLand | `JetBrains/GoLand*/options/mcp.json` | — | — |
+| WebStorm | `JetBrains/WebStorm*/options/mcp.json` | — | — |
+| Rider | `JetBrains/Rider*/options/mcp.json` | — | — |
 
 **Hooks** are advisory (exit code 0) — they remind agents to prefer MCP graph tools when they reach for grep/glob/read, without blocking the tool call.
 
@@ -291,7 +322,7 @@ Every MCP tool can be invoked from the command line:
 ```bash
 codebase-memory-mcp cli index_repository '{"repo_path": "/path/to/repo"}'
 codebase-memory-mcp cli search_graph '{"name_pattern": ".*Handler.*", "label": "Function"}'
-codebase-memory-mcp cli trace_call_path '{"function_name": "Search", "direction": "both"}'
+codebase-memory-mcp cli trace_path '{"function_name": "Search", "direction": "both"}'
 codebase-memory-mcp cli query_graph '{"query": "MATCH (f:Function) RETURN f.name LIMIT 5"}'
 codebase-memory-mcp cli list_projects
 codebase-memory-mcp cli --raw search_graph '{"label": "Function"}' | jq '.results[].name'
@@ -299,7 +330,9 @@ codebase-memory-mcp cli --raw search_graph '{"label": "Function"}' | jq '.result
 
 ## MCP Tools
 
-### Indexing
+There are **19** tools, grouped below by role.
+
+### Indexing & projects
 
 | Tool | Description |
 |------|-------------|
@@ -308,20 +341,35 @@ codebase-memory-mcp cli --raw search_graph '{"label": "Function"}' | jq '.result
 | `delete_project` | Remove a project and all its graph data. |
 | `index_status` | Check indexing status of a project. |
 
-### Querying
+### Search & navigation
 
 | Tool | Description |
 |------|-------------|
-| `search_graph` | Structured search by label, name pattern, file pattern, degree filters. Pagination via limit/offset. |
-| `trace_call_path` | BFS traversal — who calls a function and what it calls. Depth 1-5. |
-| `detect_changes` | Map git diff to affected symbols + blast radius with risk classification. |
-| `query_graph` | Execute Cypher-like graph queries (read-only). |
-| `get_graph_schema` | Node/edge counts, relationship patterns. Run this first. |
-| `get_code_snippet` | Read source code for a function by qualified name. |
-| `get_architecture` | Codebase overview: languages, packages, routes, hotspots, clusters, ADR. |
-| `search_code` | Grep-like text search within indexed project files. |
-| `manage_adr` | CRUD for Architecture Decision Records. |
-| `ingest_traces` | Ingest runtime traces to validate HTTP_CALLS edges. |
+| `search_graph` | BM25 full-text, regex `name_pattern` / `qn_pattern`, optional semantic vector search (`semantic_query` array). Pagination via `limit` / `offset`. |
+| `search_code` | Grep-like text search within indexed project files, ranked with graph context. |
+| `get_code_snippet` | Read source for a symbol by qualified name (use `search_graph` first). |
+| `get_graph_schema` | Node labels, edge types, and relationship patterns — run early in a session. |
+| `get_architecture` | High-level overview: packages, services, structure. |
+
+### Traces, impact & ADRs
+
+| Tool | Description |
+|------|-------------|
+| `trace_path` | BFS over `CALLS` / `DATA_FLOWS` / cross-service routes — callers, callees, data flow, blast radius. |
+| `query_graph` | Read-only Cypher against the stored graph. |
+| `detect_changes` | Map git diff to changed files and impacted symbols (with optional risk labels). |
+| `manage_adr` | Create or update Architecture Decision Records. |
+| `ingest_traces` | Ingest runtime traces to validate or enrich `HTTP_CALLS` / async edges. |
+
+### Test output
+
+| Tool | Description |
+|------|-------------|
+| `run_tests` | Run a **whitelisted** test command (`go test`, `pytest`, `mvn`, Gradle, `sbt`, …), parse structured output, optionally persist a `run_id` for follow-up tools. |
+| `ingest_test_reports` | Parse existing JUnit-style XML (and related formats) from disk under `cwd` or `report_dir`; use `persist` / `run_id` to keep results in the server session. |
+| `query_test_results` | Filter cases in a persisted run by `status`, name, or suite pattern. |
+| `list_test_runs` | List persisted runs (optionally filtered by `project`). |
+| `trace_test_failures` | For failed/error tests, walk `TESTS` edges to production symbols and list inbound `CALLS` up to `depth`. |
 
 ## Graph Data Model
 
@@ -439,7 +487,7 @@ SQLite databases stored at `~/.cache/codebase-memory-mcp/`. Persists across rest
 |---------|-----|
 | `/mcp` doesn't show the server | Check `.mcp.json` path is absolute. Restart agent. Test: `echo '{}' \| /path/to/binary` should output JSON. |
 | `index_repository` fails | Pass absolute path: `index_repository(repo_path="/absolute/path")` |
-| `trace_call_path` returns 0 results | Use `search_graph(name_pattern=".*PartialName.*")` first to find the exact name. |
+| `trace_path` returns 0 results | Use `search_graph(name_pattern=".*PartialName.*")` first to find the exact name. |
 | Queries return wrong project results | Add `project="name"` parameter. Use `list_projects` to see names. |
 | Binary not found after install | Add to PATH: `export PATH="$HOME/.local/bin:$PATH"` |
 | UI not loading | Ensure you downloaded the `ui` variant and ran `--ui=true`. Check `http://localhost:9749`. |
@@ -462,8 +510,8 @@ Plus: Clojure, F#, Julia, Vim Script, Nix, Common Lisp, Elm, Fortran, CUDA, COBO
 ```
 src/
   main.c              Entry point (MCP stdio server + CLI + install/update/config)
-  mcp/                MCP server (14 tools, JSON-RPC 2.0, session detection, auto-index)
-  cli/                Install/uninstall/update/config (10 agents, hooks, instructions)
+  mcp/                MCP server (19 tools, JSON-RPC 2.0, session detection, auto-index)
+  cli/                Install/uninstall/update/config (agents, JetBrains IDEs, hooks, instructions)
   store/              SQLite graph storage (nodes, edges, traversal, search, Louvain)
   pipeline/           Multi-pass indexing (structure → definitions → calls → HTTP links → config → tests)
   cypher/             Cypher query lexer, parser, planner, executor

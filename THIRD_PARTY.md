@@ -94,6 +94,7 @@ All C dependencies are vendored in `vendored/` — zero system library dependenc
 | mimalloc | MIT | [microsoft/mimalloc](https://github.com/microsoft/mimalloc) |
 | Mongoose | Dual GPLv2 / Commercial | [cesanta/mongoose](https://github.com/cesanta/mongoose) |
 | yyjson | MIT | [ibireme/yyjson](https://github.com/ibireme/yyjson) |
+| yxml | MIT | [JulStrat/yxml](https://github.com/JulStrat/yxml) |
 | xxHash | BSD-2-Clause | [Cyan4973/xxHash](https://github.com/Cyan4973/xxHash) |
 | TRE | BSD-2-Clause | [laurikari/tre](https://github.com/laurikari/tre) |
 

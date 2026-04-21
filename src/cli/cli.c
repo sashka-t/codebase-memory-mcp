@@ -440,11 +440,11 @@ static const char skill_content[] =
     "- High fan-in: `search_graph(min_degree=10, relationship=\"CALLS\", "
     "direction=\"inbound\")`\n"
     "\n"
-    "## 14 MCP Tools\n"
+    "## 19 MCP Tools\n"
     "`index_repository`, `index_status`, `list_projects`, `delete_project`,\n"
     "`search_graph`, `search_code`, `trace_path`, `detect_changes`,\n"
     "`query_graph`, `get_graph_schema`, `get_code_snippet`, `get_architecture`,\n"
-    "`manage_adr`, `ingest_traces`\n"
+    "`manage_adr`, `ingest_traces`, `run_tests`, `ingest_test_reports`, `query_test_results`\n"
     "\n"
     "## Edge Types\n"
     "CALLS, HTTP_CALLS, ASYNC_CALLS, IMPORTS, DEFINES, DEFINES_METHOD,\n"
@@ -808,6 +808,26 @@ int cbm_remove_editor_mcp(const char *config_path) {
     return rc;
 }
 
+int cbm_install_jetbrains_mcp(const char *binary_path, const char *jetbrains_config_dir) {
+    if (!binary_path || !jetbrains_config_dir) {
+        return CLI_ERR;
+    }
+
+    char config_path[CLI_BUF_1K];
+    snprintf(config_path, sizeof(config_path), "%s/options/mcp.json", jetbrains_config_dir);
+    return cbm_install_editor_mcp(binary_path, config_path);
+}
+
+int cbm_remove_jetbrains_mcp(const char *jetbrains_config_dir) {
+    if (!jetbrains_config_dir) {
+        return CLI_ERR;
+    }
+
+    char config_path[CLI_BUF_1K];
+    snprintf(config_path, sizeof(config_path), "%s/options/mcp.json", jetbrains_config_dir);
+    return cbm_remove_editor_mcp(config_path);
+}
+
 /* ── VS Code MCP (servers key with type:stdio) ────────────────── */
 
 int cbm_install_vscode_mcp(const char *binary_path, const char *config_path) {
@@ -969,6 +989,64 @@ static bool dir_exists(const char *path) {
     return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+static bool is_jetbrains_product_dir(const char *name) {
+    static const char *const prefixes[] = {
+        "IntelliJIdea",
+        "CLion",
+        "PyCharm",
+        "GoLand",
+        "WebStorm",
+        "Rider",
+    };
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+        if (strncmp(name, prefixes[i], strlen(prefixes[i])) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int collect_jetbrains_dirs(const char *home_dir, char dirs[][CLI_BUF_1K], int max_dirs) {
+    if (!home_dir || !dirs || max_dirs <= 0) {
+        return 0;
+    }
+
+    char root[CLI_BUF_1K];
+#ifdef __APPLE__
+    snprintf(root, sizeof(root), "%s/Library/Application Support/JetBrains", home_dir);
+#elif defined(_WIN32)
+    return 0;
+#else
+    snprintf(root, sizeof(root), "%s/.config/JetBrains", home_dir);
+#endif
+
+    cbm_dir_t *d = cbm_opendir(root);
+    if (!d) {
+        return 0;
+    }
+
+    int count = 0;
+    cbm_dirent_t *ent;
+    while ((ent = cbm_readdir(d)) != NULL) {
+        if (!ent->is_dir) {
+            continue;
+        }
+        if (strcmp(ent->name, ".") == 0 || strcmp(ent->name, "..") == 0) {
+            continue;
+        }
+        if (!is_jetbrains_product_dir(ent->name)) {
+            continue;
+        }
+        if (count < max_dirs) {
+            snprintf(dirs[count], CLI_BUF_1K, "%s/%s", root, ent->name);
+        }
+        count++;
+    }
+
+    cbm_closedir(d);
+    return count;
+}
+
 cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
     cbm_detected_agents_t agents;
     memset(&agents, 0, sizeof(agents));
@@ -1028,6 +1106,9 @@ cbm_detected_agents_t cbm_detect_agents(const char *home_dir) {
 
     snprintf(path, sizeof(path), "%s/.openclaw", home_dir);
     agents.openclaw = dir_exists(path);
+
+    char jetbrains_dirs[CLI_MAX_SCAN][CLI_BUF_1K];
+    agents.jetbrains = collect_jetbrains_dirs(home_dir, jetbrains_dirs, CLI_MAX_SCAN) > 0;
 
     return agents;
 }
@@ -2602,6 +2683,7 @@ static void print_detected_agents(const cbm_detected_agents_t *a) {
         {a->kilocode, "KiloCode"},
         {a->vscode, "VS-Code"},
         {a->openclaw, "OpenClaw"},
+        {a->jetbrains, "JetBrains"},
     };
     printf("Detected agents:");
     bool any = false;
@@ -2727,6 +2809,19 @@ static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const
             cbm_upsert_instructions(ip, agent_instructions_content);
         }
         printf("  instructions: %s\n", ip);
+    }
+    if (agents->jetbrains) {
+        char dirs[CLI_MAX_SCAN][CLI_BUF_1K];
+        int count = collect_jetbrains_dirs(home, dirs, CLI_MAX_SCAN);
+        if (count > 0) {
+            printf("JetBrains:\n");
+        }
+        for (int i = 0; i < count && i < CLI_MAX_SCAN; i++) {
+            if (!dry_run) {
+                cbm_install_jetbrains_mcp(binary_path, dirs[i]);
+            }
+            printf("  mcp: %s/options/mcp.json\n", dirs[i]);
+        }
     }
 }
 
@@ -2885,24 +2980,53 @@ int cbm_cmd_install(int argc, char **argv) {
         }
     }
 
-    /* Step 1c: macOS ad-hoc signing (in case binary was placed without signing) */
-#ifdef __APPLE__
-    {
-        char sign_path[CLI_BUF_1K];
-        snprintf(sign_path, sizeof(sign_path), "%s/.local/bin/codebase-memory-mcp", home);
-        struct stat sign_st;
-        if (stat(sign_path, &sign_st) == 0) {
-            (void)cbm_macos_adhoc_sign(sign_path);
-        }
-    }
-#endif
-
-    /* Step 2: Binary path — detect actual location at runtime. */
+    /* Step 2: MCP binary path — always ~/.local/bin/codebase-memory-mcp (copy if needed). */
     char self_path[CLI_BUF_1K] = {0};
     cbm_detect_self_path(self_path, sizeof(self_path), home);
 
+    char canon_bin[CLI_BUF_1K];
+#ifdef _WIN32
+    snprintf(canon_bin, sizeof(canon_bin), "%s/.local/bin/codebase-memory-mcp.exe", home);
+#else
+    snprintf(canon_bin, sizeof(canon_bin), "%s/.local/bin/codebase-memory-mcp", home);
+#endif
+
+    const char *mcp_binary_path = canon_bin;
+    if (!dry_run) {
+        if (strcmp(self_path, canon_bin) != 0) {
+            char bin_dir_local[CLI_BUF_1K];
+            snprintf(bin_dir_local, sizeof(bin_dir_local), "%s/.local/bin", home);
+            if (mkdirp(bin_dir_local, DIR_PERMS) != 0) {
+                (void)fprintf(stderr,
+                              "warning: could not create %s — using %s for MCP configs\n",
+                              bin_dir_local, self_path);
+                mcp_binary_path = self_path;
+            } else if (cbm_copy_file(self_path, canon_bin) != 0) {
+                (void)fprintf(stderr,
+                              "warning: could not copy binary to %s — using %s for MCP configs\n",
+                              canon_bin, self_path);
+                mcp_binary_path = self_path;
+            } else {
+#ifndef _WIN32
+                (void)chmod(canon_bin, (mode_t)CLI_OCTAL_PERM);
+#endif
+#ifdef __APPLE__
+                (void)cbm_macos_adhoc_sign(canon_bin);
+#endif
+                printf("Installed binary to %s\n\n", canon_bin);
+            }
+        } else {
+#ifdef __APPLE__
+            struct stat st;
+            if (stat(canon_bin, &st) == 0) {
+                (void)cbm_macos_adhoc_sign(canon_bin);
+            }
+#endif
+        }
+    }
+
     /* Step 3: Install/refresh all agent configs */
-    cbm_install_agent_configs(home, self_path, force, dry_run);
+    cbm_install_agent_configs(home, mcp_binary_path, force, dry_run);
 
     /* Step 4: Ensure PATH */
     char bin_dir[CLI_BUF_1K];
@@ -3030,6 +3154,19 @@ static void uninstall_cli_agents(const cbm_detected_agents_t *agents, const char
             cbm_remove_instructions(ip);
         }
         printf("Aider: removed instructions\n");
+    }
+    if (agents->jetbrains) {
+        char dirs[CLI_MAX_SCAN][CLI_BUF_1K];
+        int count = collect_jetbrains_dirs(home, dirs, CLI_MAX_SCAN);
+        if (count > 0) {
+            printf("JetBrains:\n");
+        }
+        for (int i = 0; i < count && i < CLI_MAX_SCAN; i++) {
+            if (!dry_run) {
+                cbm_remove_jetbrains_mcp(dirs[i]);
+            }
+            printf("  removed mcp: %s/options/mcp.json\n", dirs[i]);
+        }
     }
 }
 

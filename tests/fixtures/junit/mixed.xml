@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="com.example.MyTest" tests="4" failures="1" errors="1" skipped="1" time="1.25">
+    <testcase classname="com.example.MyTest" name="testPass" time="0.05"/>
+    <testcase classname="com.example.MyTest" name="testFail" time="0.10">
+      <failure message="expected 1 but got 2" type="AssertionError">stack line 1
+line 2</failure>
+    </testcase>
+    <testcase classname="com.example.MyTest" name="testErr" time="0.02">
+      <error message="boom" type="java.lang.RuntimeException">err body</error>
+    </testcase>
+    <testcase classname="com.example.MyTest" name="testSkip" time="0.00">
+      <skipped/>
+    </testcase>
+  </testsuite>
+</testsuites>

@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+<testsuite name="only.suite.Tests" tests="1" failures="0" errors="0" skipped="0" time="0.5">
+  <testcase classname="only.suite.Tests" name="okCase" time="0.5"/>
+</testsuite>
