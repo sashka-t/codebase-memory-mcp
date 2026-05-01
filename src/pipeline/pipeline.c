@@ -15,6 +15,7 @@
 enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 5, PL_WAL_BUF = 1040 };
 #define PL_NSEC_PER_SEC 1000000000LL
 #include "pipeline/pipeline.h"
+#include "pipeline/artifact.h"
 #include "pipeline/pipeline_internal.h"
 #include "pipeline/worker_pool.h"
 #include "graph_buffer/graph_buffer.h"
@@ -73,6 +74,7 @@ struct cbm_pipeline {
     char *project_name;
     cbm_index_mode_t mode;
     atomic_int cancelled;
+    bool persistence; /* write .codebase-memory/graph.db.zst after indexing */
 
     /* Indexing state (set during run) */
     cbm_gbuf_t *gbuf;
@@ -81,6 +83,18 @@ struct cbm_pipeline {
     /* User-defined extension overrides (loaded once per run) */
     cbm_userconfig_t *userconfig;
 };
+
+/* ── Global pkgmap (one active pipeline at a time) ─────────────── */
+
+static CBMHashTable *g_pkgmap = NULL;
+
+CBMHashTable *cbm_pipeline_get_pkgmap(void) {
+    return g_pkgmap;
+}
+
+void cbm_pipeline_set_pkgmap(CBMHashTable *map) {
+    g_pkgmap = map;
+}
 
 /* ── Timing helper ──────────────────────────────────────────────── */
 
@@ -118,9 +132,16 @@ cbm_pipeline_t *cbm_pipeline_new(const char *repo_path, const char *db_path,
     p->db_path = db_path ? strdup(db_path) : NULL;
     p->project_name = cbm_project_name_from_path(repo_path);
     p->mode = mode;
+    p->persistence = false;
     atomic_init(&p->cancelled, 0);
 
     return p;
+}
+
+void cbm_pipeline_set_persistence(cbm_pipeline_t *p, bool enabled) {
+    if (p) {
+        p->persistence = enabled;
+    }
 }
 
 void cbm_pipeline_free(cbm_pipeline_t *p) {
@@ -455,6 +476,11 @@ static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
                                    const cbm_file_info_t *files, int file_count,
                                    struct timespec *t) {
     cbm_log_info("pipeline.mode", "mode", "sequential", "files", itoa_buf(file_count));
+
+    /* Build package map from manifest files (sequential: read manifests directly) */
+    /* Build package map from manifest files (sequential: read manifests directly) */
+    cbm_pipeline_set_pkgmap(cbm_pkgmap_build_from_files(files, file_count, ctx->project_name));
+
     CBMFileResult **seq_cache = (CBMFileResult **)calloc(file_count, sizeof(CBMFileResult *));
     if (seq_cache) {
         ctx->result_cache = seq_cache;
@@ -666,6 +692,12 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
         cbm_store_close(hash_store);
         cbm_log_info("pass.timing", "pass", "persist_hashes", "files", itoa_buf(file_count));
     }
+
+    /* Export persistent artifact if enabled */
+    if (p->persistence) {
+        cbm_artifact_export(db_path, p->repo_path, p->project_name, CBM_ARTIFACT_BEST);
+    }
+
     return 0;
 }
 
@@ -854,6 +886,8 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     CBM_PROF_END("pipeline", "TOTAL", t_pipeline_total);
 
 cleanup:
+    cbm_pkgmap_free(cbm_pipeline_get_pkgmap());
+    cbm_pipeline_set_pkgmap(NULL);
     cbm_discover_free(files, file_count);
     cbm_gbuf_free(p->gbuf);
     p->gbuf = NULL;

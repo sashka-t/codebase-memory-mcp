@@ -173,14 +173,38 @@ func download(dest string) error {
 	return nil
 }
 
-func httpGet(url, dest string) error {
-	resp, err := http.Get(url) //nolint:gosec
+// validateURLScheme rejects non-https URLs before any fetch (defense-in-depth).
+func validateURLScheme(rawURL string) error {
+	if !strings.HasPrefix(rawURL, "https://") {
+		return fmt.Errorf("refusing non-https URL: %s", rawURL)
+	}
+	return nil
+}
+
+// httpsOnlyClient returns an HTTP client that rejects non-HTTPS redirects.
+var httpsOnlyClient = &http.Client{
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != "https" {
+			return fmt.Errorf("refusing non-https redirect to %s", req.URL)
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("too many redirects")
+		}
+		return nil
+	},
+}
+
+func httpGet(rawURL, dest string) error {
+	if err := validateURLScheme(rawURL); err != nil {
+		return err
+	}
+	resp, err := httpsOnlyClient.Get(rawURL) //nolint:gosec
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
+		return fmt.Errorf("HTTP %d for %s", resp.StatusCode, rawURL)
 	}
 	f, err := os.Create(dest)
 	if err != nil {
@@ -192,7 +216,10 @@ func httpGet(url, dest string) error {
 }
 
 func fetchChecksums(url string) (map[string]string, error) {
-	resp, err := http.Get(url) //nolint:gosec
+	if err := validateURLScheme(url); err != nil {
+		return nil, err
+	}
+	resp, err := httpsOnlyClient.Get(url) //nolint:gosec
 	if err != nil {
 		return nil, err
 	}

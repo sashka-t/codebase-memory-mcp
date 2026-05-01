@@ -26,6 +26,8 @@ enum {
 #define PP_NSEC_PER_SEC 1000000000ULL
 #define PP_USEC_PER_MS 1000000ULL
 #define PP_HALF_CONF 0.5
+#define PP_FIELD_HINT_CONF 0.85
+enum { PP_CSHARP_M_PREFIX_LEN = 2 };
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
 #include "pipeline/worker_pool.h"
@@ -397,6 +399,8 @@ typedef struct {
     _Atomic int64_t *shared_ids;
     _Atomic int *cancelled;
     _Atomic int next_file_idx;
+
+    cbm_pkg_entries_t *pkg_entries; /* per-worker manifest arrays (separate allocation) */
 } extract_ctx_t;
 
 /* Insert one definition node (and its route if present) into the local gbuf. */
@@ -504,6 +508,13 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
          * are released before the slab is bulk-reclaimed. */
         cbm_free_tree(result);
 
+        /* Detect and parse manifest files for package map */
+        {
+            const char *bn = strrchr(fi->rel_path, '/');
+            cbm_pkgmap_try_parse(bn ? bn + SKIP_ONE : fi->rel_path, fi->rel_path, source,
+                                 source_len, &ec->pkg_entries[worker_id]);
+        }
+
         /* Free source buffer — extraction captured everything needed. */
         free_source(source);
 
@@ -535,6 +546,28 @@ static void extract_worker(int worker_id, void *ctx_ptr) {
 
     /* Final cleanup (parser already destroyed in loop, just slab state) */
     cbm_slab_destroy_thread();
+}
+
+static void merge_pkg_entries(cbm_pipeline_ctx_t *ctx, cbm_pkg_entries_t *pkg_entries,
+                              int worker_count) {
+    if (!pkg_entries) {
+        return;
+    }
+    cbm_pipeline_set_pkgmap(cbm_pkgmap_build(pkg_entries, worker_count, ctx->project_name));
+    for (int i = 0; i < worker_count; i++) {
+        cbm_pkg_entries_free(&pkg_entries[i]);
+    }
+    free(pkg_entries);
+}
+
+static void log_extract_mem_stats(int worker_count) {
+    if (cbm_mem_budget() > 0) {
+        size_t mb = (size_t)CBM_SZ_1K * CBM_SZ_1K;
+        cbm_log_info("parallel.extract.mem", "rss_mb", itoa_log((int)(cbm_mem_rss() / mb)),
+                     "peak_mb", itoa_log((int)(cbm_mem_peak_rss() / mb)), "budget_mb",
+                     itoa_log((int)(cbm_mem_budget() / mb)), "per_worker_mb",
+                     itoa_log((int)(cbm_mem_worker_budget(worker_count) / mb)));
+    }
 }
 
 int cbm_parallel_extract(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, int file_count,
@@ -583,6 +616,9 @@ int cbm_parallel_extract(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     }
     memset(workers, 0, (size_t)worker_count * sizeof(extract_worker_state_t));
 
+    /* Per-worker manifest entry arrays (separate from cache-line-aligned worker state) */
+    cbm_pkg_entries_t *pkg_entries = calloc(worker_count, sizeof(cbm_pkg_entries_t));
+
     extract_ctx_t ec = {
         .files = files,
         .sorted = sorted,
@@ -594,6 +630,7 @@ int cbm_parallel_extract(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
         .result_cache = result_cache,
         .shared_ids = shared_ids,
         .cancelled = ctx->cancelled,
+        .pkg_entries = pkg_entries,
     };
     atomic_init(&ec.next_worker_id, 0);
     atomic_init(&ec.next_file_idx, 0);
@@ -618,6 +655,8 @@ int cbm_parallel_extract(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     }
     CBM_PROF_END_N("parallel_extract", "4_merge_gbufs_seq", t_merge, total_nodes);
 
+    merge_pkg_entries(ctx, pkg_entries, worker_count);
+
     cbm_aligned_free(workers);
     free(sorted);
 
@@ -625,16 +664,7 @@ int cbm_parallel_extract(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
         return CBM_NOT_FOUND;
     }
 
-    /* RSS-based memory stats after extraction */
-    if (cbm_mem_budget() > 0) {
-        size_t rss_mb = cbm_mem_rss() / ((size_t)CBM_SZ_1K * CBM_SZ_1K);
-        size_t peak_mb = cbm_mem_peak_rss() / ((size_t)CBM_SZ_1K * CBM_SZ_1K);
-        size_t budget_mb = cbm_mem_budget() / ((size_t)CBM_SZ_1K * CBM_SZ_1K);
-        size_t worker_mb = cbm_mem_worker_budget(worker_count) / ((size_t)CBM_SZ_1K * CBM_SZ_1K);
-        cbm_log_info("parallel.extract.mem", "rss_mb", itoa_log((int)rss_mb), "peak_mb",
-                     itoa_log((int)peak_mb), "budget_mb", itoa_log((int)budget_mb), "per_worker_mb",
-                     itoa_log((int)worker_mb));
-    }
+    log_extract_mem_stats(worker_count);
 
     cbm_log_info("parallel.extract.done", "nodes", itoa_log(total_nodes), "errors",
                  itoa_log(total_errors));
@@ -682,14 +712,7 @@ static int create_imports_edges(cbm_pipeline_ctx_t *ctx, const CBMFileResult *re
         if (!imp->module_path) {
             continue;
         }
-        char *target_qn = NULL;
-        char *resolved = cbm_pipeline_resolve_relative_import(rel, imp->module_path);
-        if (resolved) {
-            target_qn = cbm_pipeline_fqn_module(ctx->project_name, resolved);
-            free(resolved);
-        } else {
-            target_qn = cbm_pipeline_fqn_module(ctx->project_name, imp->module_path);
-        }
+        char *target_qn = cbm_pipeline_resolve_module(ctx, rel, imp->module_path);
         const cbm_gbuf_node_t *target = cbm_gbuf_find_by_qn(ctx->gbuf, target_qn);
         char *file_qn = cbm_pipeline_fqn_compute(ctx->project_name, rel, "__file__");
         const cbm_gbuf_node_t *source_node = cbm_gbuf_find_by_qn(ctx->gbuf, file_qn);
@@ -1139,6 +1162,165 @@ static void detect_url_in_args(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
     }
 }
 
+/* Extract gRPC service and method from a callee name.
+ * Handles patterns like: pb.NewFooServiceClient(conn).GetBar → Foo/GetBar
+ * Also: FooServiceGrpc.newBlockingStub(ch).getBar → FooService/getBar */
+static bool extract_grpc_service_method(const char *callee, char *service, size_t srv_sz,
+                                        char *method, size_t meth_sz) {
+    service[0] = '\0';
+    method[0] = '\0';
+    if (!callee) {
+        return false;
+    }
+    /* Find last dot to split service.Method */
+    const char *last_dot = strrchr(callee, '.');
+    if (!last_dot || !last_dot[SKIP_ONE]) {
+        return false;
+    }
+    snprintf(method, meth_sz, "%s", last_dot + SKIP_ONE);
+
+    /* Extract service name: everything before the last dot, stripped of prefixes/suffixes */
+    size_t prefix_len = (size_t)(last_dot - callee);
+    char raw[CBM_SZ_256];
+    if (prefix_len >= sizeof(raw)) {
+        prefix_len = sizeof(raw) - SKIP_ONE;
+    }
+    memcpy(raw, callee, prefix_len);
+    raw[prefix_len] = '\0';
+
+    /* Strip common prefixes: pb.New, New, pb. */
+    const char *s = raw;
+    if (strncmp(s, "pb.New", CBM_SZ_6) == 0) {
+        s += CBM_SZ_6;
+    } else if (strncmp(s, "pb.", CBM_SZ_3) == 0 || strncmp(s, "New", CBM_SZ_3) == 0) {
+        s += CBM_SZ_3;
+    }
+
+    /* Strip common suffixes: Client, ServiceClient, ServiceGrpc, Stub */
+    snprintf(service, srv_sz, "%s", s);
+    size_t slen = strlen(service);
+    static const char *suffixes[] = {"ServiceClient", "Client", "ServiceGrpc", "BlockingStub",
+                                     "FutureStub",    "Stub",   "Servicer",    NULL};
+    for (const char **sfx = suffixes; *sfx; sfx++) {
+        size_t flen = strlen(*sfx);
+        if (slen > flen && strcmp(service + slen - flen, *sfx) == 0) {
+            service[slen - flen] = '\0';
+            break;
+        }
+    }
+
+    return service[0] && method[0];
+}
+
+/* Emit GRPC_CALLS edge via gRPC Route node. */
+static void emit_grpc_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, const CBMCall *call,
+                           const cbm_resolution_t *res) {
+    char service[CBM_SZ_256];
+    char method[CBM_SZ_256];
+    /* Try callee_name first (e.g., "pb.NewCartServiceClient.GetCart") */
+    if (!extract_grpc_service_method(call->callee_name, service, sizeof(service), method,
+                                     sizeof(method))) {
+        /* Fallback: try the resolved QN for Go chained calls.
+         * Go pattern: pb.NewCartServiceClient(conn).GetCart(ctx, req)
+         * callee_name = "GetCart", QN = "...CartServiceClient.GetCart"
+         * The QN contains the full ServiceClient.Method pattern. */
+        if (!res->qualified_name ||
+            !extract_grpc_service_method(res->qualified_name, service, sizeof(service), method,
+                                         sizeof(method))) {
+            return;
+        }
+    }
+
+    char route_qn[CBM_SZ_512];
+    snprintf(route_qn, sizeof(route_qn), "__grpc__%s/%s", service, method);
+
+    char route_name[CBM_SZ_256];
+    snprintf(route_name, sizeof(route_name), "%s/%s", service, method);
+
+    int64_t route_id = cbm_gbuf_upsert_node(gbuf, "Route", route_name, route_qn, "", 0, 0,
+                                            "{\"source\":\"grpc\"}");
+
+    char esc_c[CBM_SZ_256];
+    cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
+    char props[CBM_SZ_1K];
+    snprintf(props, sizeof(props),
+             "{\"callee\":\"%s\",\"service\":\"%s\",\"method\":\"%s\",\"confidence\":%.2f}", esc_c,
+             service, method, res->confidence);
+    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "GRPC_CALLS", props);
+}
+
+/* Emit GRAPHQL_CALLS edge. Extract operation from first string arg if available. */
+static void emit_graphql_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, const CBMCall *call,
+                              const cbm_resolution_t *res) {
+    const char *op = call->first_string_arg;
+    if (!op || !op[0]) {
+        op = call->callee_name;
+    }
+    /* Try to extract a query/mutation name from the operation string */
+    char op_name[CBM_SZ_256];
+    snprintf(op_name, sizeof(op_name), "%s", op);
+    /* Trim leading whitespace and "query "/"mutation " prefix */
+    const char *p = op_name;
+    while (*p == ' ' || *p == '\t' || *p == '\n') {
+        p++;
+    }
+    if (strncmp(p, "query ", CBM_SZ_6) == 0) {
+        p += CBM_SZ_6;
+    } else if (strncmp(p, "mutation ", CBM_SZ_8) == 0) {
+        p += CBM_SZ_8;
+    }
+
+    char route_qn[CBM_SZ_512];
+    snprintf(route_qn, sizeof(route_qn), "__graphql__%s", p);
+
+    int64_t route_id =
+        cbm_gbuf_upsert_node(gbuf, "Route", p, route_qn, "", 0, 0, "{\"source\":\"graphql\"}");
+
+    char esc_c[CBM_SZ_256];
+    cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
+    char props[CBM_SZ_1K];
+    snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"operation\":\"%s\",\"confidence\":%.2f}",
+             esc_c, p, res->confidence);
+    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "GRAPHQL_CALLS", props);
+}
+
+/* Emit TRPC_CALLS edge. Extract procedure path from callee chain. */
+static void emit_trpc_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source, const CBMCall *call,
+                           const cbm_resolution_t *res) {
+    /* tRPC calls: trpc.user.getById.query() → extract "user.getById" */
+    const char *callee = call->callee_name;
+    if (!callee) {
+        return;
+    }
+    /* Strip trailing .query/.mutate/.subscribe */
+    char proc[CBM_SZ_256];
+    snprintf(proc, sizeof(proc), "%s", callee);
+    char *last_dot = strrchr(proc, '.');
+    if (last_dot && (strcmp(last_dot, ".query") == 0 || strcmp(last_dot, ".mutate") == 0 ||
+                     strcmp(last_dot, ".subscribe") == 0 || strcmp(last_dot, ".useQuery") == 0 ||
+                     strcmp(last_dot, ".useMutation") == 0)) {
+        *last_dot = '\0';
+    }
+    /* Strip leading trpc. */
+    const char *p = proc;
+    if (strncmp(p, "trpc.", CBM_SZ_5) == 0) {
+        p += CBM_SZ_5;
+    }
+
+    char route_qn[CBM_SZ_512];
+    snprintf(route_qn, sizeof(route_qn), "__trpc__%s", p);
+
+    int64_t route_id =
+        cbm_gbuf_upsert_node(gbuf, "Route", p, route_qn, "", 0, 0, "{\"source\":\"trpc\"}");
+
+    char esc_c[CBM_SZ_256];
+    cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
+    char props[CBM_SZ_1K];
+    snprintf(props, sizeof(props), "{\"callee\":\"%s\",\"procedure\":\"%s\",\"confidence\":%.2f}",
+             esc_c, p, res->confidence);
+    cbm_gbuf_insert_edge(gbuf, source->id, route_id, "TRPC_CALLS", props);
+}
+
 static void emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
                               const cbm_gbuf_node_t *target, const CBMCall *call,
                               const cbm_resolution_t *res, const char *module_qn,
@@ -1151,6 +1333,18 @@ static void emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
      * local variables like app.include_router where QN resolution fails). */
     if (svc == CBM_SVC_NONE && cbm_service_pattern_route_method(call->callee_name) != NULL) {
         svc = CBM_SVC_ROUTE_REG;
+    }
+
+    /* Detect gRPC stub method calls by resolved QN.
+     * Go pattern: pb.NewCartServiceClient(conn).GetCart(ctx, req)
+     * Tree-sitter extracts GetCart as the callee, which resolves to the
+     * generated pb interface method (QN contains "ServiceClient"). */
+    if (svc == CBM_SVC_NONE && res->qualified_name) {
+        if (strstr(res->qualified_name, "ServiceClient") != NULL ||
+            strstr(res->qualified_name, "ServiceGrpc") != NULL ||
+            strstr(res->qualified_name, "Servicer") != NULL) {
+            svc = CBM_SVC_GRPC;
+        }
     }
 
     if (svc == CBM_SVC_ROUTE_REG) {
@@ -1169,6 +1363,12 @@ static void emit_service_edge(cbm_gbuf_t *gbuf, const cbm_gbuf_node_t *source,
 
     if ((svc == CBM_SVC_HTTP || svc == CBM_SVC_ASYNC) && (has_url || has_topic)) {
         emit_http_async_service_edge(gbuf, source, call, res, svc, arg);
+    } else if (svc == CBM_SVC_GRPC) {
+        emit_grpc_edge(gbuf, source, call, res);
+    } else if (svc == CBM_SVC_GRAPHQL) {
+        emit_graphql_edge(gbuf, source, call, res);
+    } else if (svc == CBM_SVC_TRPC) {
+        emit_trpc_edge(gbuf, source, call, res);
     } else if (svc == CBM_SVC_CONFIG) {
         emit_config_edge(gbuf, source, target, call, res, arg);
     } else {
@@ -1193,6 +1393,60 @@ static const cbm_gbuf_node_t *find_source_node(const cbm_gbuf_t *gbuf, const cha
     return src;
 }
 
+/* Field type hint resolution for obj.Method() with multiple candidates.
+ * Strips C# field prefixes (_ / m_), capitalizes to get type name, and
+ * checks if TypeName.Method or ITypeName.Method exists among candidates. */
+static void try_field_type_hint(resolve_ctx_t *rc, cbm_resolution_t *res, const char *callee_name,
+                                int64_t source_id) {
+    if (!res->qualified_name || res->candidate_count <= SKIP_ONE) {
+        return;
+    }
+    const char *dot = strchr(callee_name, '.');
+    if (!dot) {
+        return;
+    }
+    size_t plen = (size_t)(dot - callee_name);
+    char obj_name[CBM_SZ_256];
+    if (plen >= sizeof(obj_name)) {
+        return;
+    }
+    memcpy(obj_name, callee_name, plen);
+    obj_name[plen] = '\0';
+
+    const char *type_hint = obj_name;
+    if (type_hint[0] == '_') {
+        type_hint++;
+    }
+    if (type_hint[0] == 'm' && type_hint[SKIP_ONE] == '_') {
+        type_hint += PP_CSHARP_M_PREFIX_LEN;
+    }
+
+    char type_name[CBM_SZ_256];
+    snprintf(type_name, sizeof(type_name), "%s", type_hint);
+    if (type_name[0] >= 'a' && type_name[0] <= 'z') {
+        type_name[0] -= ('a' - 'A');
+    }
+
+    char iface_name[CBM_SZ_256];
+    snprintf(iface_name, sizeof(iface_name), "I%s", type_name);
+
+    const char *method = dot + SKIP_ONE;
+    const char **cands = NULL;
+    int cand_count = 0;
+    cbm_registry_find_by_name(rc->registry, method, &cands, &cand_count);
+    for (int ci = 0; ci < cand_count; ci++) {
+        if (strstr(cands[ci], type_name) || strstr(cands[ci], iface_name)) {
+            const cbm_gbuf_node_t *better = cbm_gbuf_find_by_qn(rc->main_gbuf, cands[ci]);
+            if (better && better->id != source_id) {
+                res->qualified_name = cands[ci];
+                res->confidence = PP_FIELD_HINT_CONF;
+                res->strategy = "field_type_hint";
+                return;
+            }
+        }
+    }
+}
+
 /* Resolve calls for one file and emit CALLS/HTTP_CALLS/ASYNC_CALLS edges. */
 static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CBMFileResult *result,
                                const char *rel, const char *module_qn, const char **imp_keys,
@@ -1210,6 +1464,9 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
 
         cbm_resolution_t res = cbm_registry_resolve(rc->registry, call->callee_name, module_qn,
                                                     imp_keys, imp_vals, imp_count);
+
+        try_field_type_hint(rc, &res, call->callee_name, source_node->id);
+
         if (!res.qualified_name || res.qualified_name[0] == '\0') {
             if (cbm_service_pattern_route_method(call->callee_name) != NULL) {
                 cbm_resolution_t fake_res = {.qualified_name = call->callee_name,

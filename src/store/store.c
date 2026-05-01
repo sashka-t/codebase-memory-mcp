@@ -212,47 +212,49 @@ static void iso_now(char *buf, size_t sz) {
 /* ── Schema ─────────────────────────────────────────────────────── */
 
 static int init_schema(cbm_store_t *s) {
-    const char *ddl = "CREATE TABLE IF NOT EXISTS projects ("
-                      "  name TEXT PRIMARY KEY,"
-                      "  indexed_at TEXT NOT NULL,"
-                      "  root_path TEXT NOT NULL"
-                      ");"
-                      "CREATE TABLE IF NOT EXISTS file_hashes ("
-                      "  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,"
-                      "  rel_path TEXT NOT NULL,"
-                      "  sha256 TEXT NOT NULL,"
-                      "  mtime_ns INTEGER NOT NULL DEFAULT 0,"
-                      "  size INTEGER NOT NULL DEFAULT 0,"
-                      "  PRIMARY KEY (project, rel_path)"
-                      ");"
-                      "CREATE TABLE IF NOT EXISTS nodes ("
-                      "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                      "  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,"
-                      "  label TEXT NOT NULL,"
-                      "  name TEXT NOT NULL,"
-                      "  qualified_name TEXT NOT NULL,"
-                      "  file_path TEXT DEFAULT '',"
-                      "  start_line INTEGER DEFAULT 0,"
-                      "  end_line INTEGER DEFAULT 0,"
-                      "  properties TEXT DEFAULT '{}',"
-                      "  UNIQUE(project, qualified_name)"
-                      ");"
-                      "CREATE TABLE IF NOT EXISTS edges ("
-                      "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                      "  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,"
-                      "  source_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,"
-                      "  target_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,"
-                      "  type TEXT NOT NULL,"
-                      "  properties TEXT DEFAULT '{}',"
-                      "  UNIQUE(source_id, target_id, type)"
-                      ");"
-                      "CREATE TABLE IF NOT EXISTS project_summaries ("
-                      "  project TEXT PRIMARY KEY,"
-                      "  summary TEXT NOT NULL,"
-                      "  source_hash TEXT NOT NULL,"
-                      "  created_at TEXT NOT NULL,"
-                      "  updated_at TEXT NOT NULL"
-                      ");";
+    const char *ddl =
+        "CREATE TABLE IF NOT EXISTS projects ("
+        "  name TEXT PRIMARY KEY,"
+        "  indexed_at TEXT NOT NULL,"
+        "  root_path TEXT NOT NULL"
+        ");"
+        "CREATE TABLE IF NOT EXISTS file_hashes ("
+        "  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,"
+        "  rel_path TEXT NOT NULL,"
+        "  sha256 TEXT NOT NULL,"
+        "  mtime_ns INTEGER NOT NULL DEFAULT 0,"
+        "  size INTEGER NOT NULL DEFAULT 0,"
+        "  PRIMARY KEY (project, rel_path)"
+        ");"
+        "CREATE TABLE IF NOT EXISTS nodes ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,"
+        "  label TEXT NOT NULL,"
+        "  name TEXT NOT NULL,"
+        "  qualified_name TEXT NOT NULL,"
+        "  file_path TEXT DEFAULT '',"
+        "  start_line INTEGER DEFAULT 0,"
+        "  end_line INTEGER DEFAULT 0,"
+        "  properties TEXT DEFAULT '{}',"
+        "  UNIQUE(project, qualified_name)"
+        ");"
+        "CREATE TABLE IF NOT EXISTS edges ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,"
+        "  source_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,"
+        "  target_id INTEGER NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,"
+        "  type TEXT NOT NULL,"
+        "  properties TEXT DEFAULT '{}',"
+        "  url_path_gen TEXT GENERATED ALWAYS AS (json_extract(properties,'$.url_path')),"
+        "  UNIQUE(source_id, target_id, type)"
+        ");"
+        "CREATE TABLE IF NOT EXISTS project_summaries ("
+        "  project TEXT PRIMARY KEY,"
+        "  summary TEXT NOT NULL,"
+        "  source_hash TEXT NOT NULL,"
+        "  created_at TEXT NOT NULL,"
+        "  updated_at TEXT NOT NULL"
+        ");";
 
     int rc = exec_sql(s, ddl);
     if (rc != CBM_STORE_OK) {
@@ -290,7 +292,8 @@ static int create_user_indexes(cbm_store_t *s) {
         "CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id, type);"
         "CREATE INDEX IF NOT EXISTS idx_edges_type ON edges(project, type);"
         "CREATE INDEX IF NOT EXISTS idx_edges_target_type ON edges(project, target_id, type);"
-        "CREATE INDEX IF NOT EXISTS idx_edges_source_type ON edges(project, source_id, type);";
+        "CREATE INDEX IF NOT EXISTS idx_edges_source_type ON edges(project, source_id, type);"
+        "CREATE INDEX IF NOT EXISTS idx_edges_url_path ON edges(project, url_path_gen);";
     return exec_sql(s, sql);
 }
 
@@ -2693,6 +2696,36 @@ int cbm_deduplicate_hops(const cbm_node_hop_t *hops, int hop_count, cbm_node_hop
 
 /* ── Schema ─────────────────────────────────────────────────────── */
 
+enum { SCHEMA_MAX_JSON_KEYS = 50 };
+
+/* Discover distinct JSON property keys for a table/column via json_each().
+ * Prepends base_cols, then appends up to SCHEMA_MAX_JSON_KEYS from the query.
+ * Caller must free the returned array and each string in it. */
+static void schema_discover_props(sqlite3 *db, const char *sql, const char *project,
+                                  const char *filter, const char **base_cols, int base_col_count,
+                                  char ***out_props, int *out_count) {
+    int pcap = base_col_count + SCHEMA_MAX_JSON_KEYS;
+    char **props = malloc(pcap * sizeof(char *));
+    int pn = 0;
+
+    for (int b = 0; b < base_col_count; b++) {
+        props[pn++] = heap_strdup(base_cols[b]);
+    }
+
+    sqlite3_stmt *pstmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, CBM_NOT_FOUND, &pstmt, NULL) == SQLITE_OK) {
+        bind_text(pstmt, SKIP_ONE, project);
+        bind_text(pstmt, PAIR_LEN, filter);
+        while (sqlite3_step(pstmt) == SQLITE_ROW && pn < pcap) {
+            props[pn++] = heap_strdup((const char *)sqlite3_column_text(pstmt, 0));
+        }
+        sqlite3_finalize(pstmt);
+    }
+
+    *out_props = props;
+    *out_count = pn;
+}
+
 int cbm_store_get_schema(cbm_store_t *s, const char *project, cbm_schema_info_t *out) {
     memset(out, 0, sizeof(*out));
     if (!s || !s->db) {
@@ -2717,11 +2750,32 @@ int cbm_store_get_schema(cbm_store_t *s, const char *project, cbm_schema_info_t 
             }
             arr[n].label = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
             arr[n].count = sqlite3_column_int(stmt, SKIP_ONE);
+            arr[n].properties = NULL;
+            arr[n].property_count = 0;
             n++;
         }
         sqlite3_finalize(stmt);
         out->node_labels = arr;
         out->node_label_count = n;
+    }
+
+    /* Node label property keys: base columns + distinct JSON property keys per label */
+    {
+        static const char *node_base_cols[] = {"name", "qualified_name", "file_path", "start_line",
+                                               "end_line"};
+        const char *prop_sql = "SELECT DISTINCT je.key "
+                               "FROM nodes, json_each(nodes.properties) AS je "
+                               "WHERE nodes.project = ?1 AND nodes.label = ?2 "
+                               "  AND nodes.properties != '{}' "
+                               "ORDER BY je.key "
+                               "LIMIT 50;";
+
+        for (int i = 0; i < out->node_label_count; i++) {
+            schema_discover_props(
+                s->db, prop_sql, project, out->node_labels[i].label, node_base_cols,
+                (int)(sizeof(node_base_cols) / sizeof(node_base_cols[0])),
+                &out->node_labels[i].properties, &out->node_labels[i].property_count);
+        }
     }
 
     /* Edge types */
@@ -2742,11 +2796,31 @@ int cbm_store_get_schema(cbm_store_t *s, const char *project, cbm_schema_info_t 
             }
             arr[n].type = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
             arr[n].count = sqlite3_column_int(stmt, SKIP_ONE);
+            arr[n].properties = NULL;
+            arr[n].property_count = 0;
             n++;
         }
         sqlite3_finalize(stmt);
         out->edge_types = arr;
         out->edge_type_count = n;
+    }
+
+    /* Edge type property keys: base columns + distinct JSON property keys per type */
+    {
+        static const char *edge_base_cols[] = {"source_id", "target_id"};
+        const char *prop_sql = "SELECT DISTINCT je.key "
+                               "FROM edges, json_each(edges.properties) AS je "
+                               "WHERE edges.project = ?1 AND edges.type = ?2 "
+                               "  AND edges.properties != '{}' "
+                               "ORDER BY je.key "
+                               "LIMIT 50;";
+
+        for (int i = 0; i < out->edge_type_count; i++) {
+            schema_discover_props(s->db, prop_sql, project, out->edge_types[i].type, edge_base_cols,
+                                  (int)(sizeof(edge_base_cols) / sizeof(edge_base_cols[0])),
+                                  &out->edge_types[i].properties,
+                                  &out->edge_types[i].property_count);
+        }
     }
 
     return CBM_STORE_OK;
@@ -2758,11 +2832,19 @@ void cbm_store_schema_free(cbm_schema_info_t *out) {
     }
     for (int i = 0; i < out->node_label_count; i++) {
         free((void *)out->node_labels[i].label);
+        for (int j = 0; j < out->node_labels[i].property_count; j++) {
+            free(out->node_labels[i].properties[j]);
+        }
+        free(out->node_labels[i].properties);
     }
     free(out->node_labels);
 
     for (int i = 0; i < out->edge_type_count; i++) {
         free((void *)out->edge_types[i].type);
+        for (int j = 0; j < out->edge_types[i].property_count; j++) {
+            free(out->edge_types[i].properties[j]);
+        }
+        free(out->edge_types[i].properties);
     }
     free(out->edge_types);
 
