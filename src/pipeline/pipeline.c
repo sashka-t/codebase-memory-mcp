@@ -12,11 +12,12 @@
  */
 #include "foundation/constants.h"
 
-enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 5, PL_WAL_BUF = 1040 };
+enum { CBM_DIR_PERMS = 0755, PL_RING = 4, PL_RING_MASK = 3, PL_SEQ_PASSES = 6, PL_WAL_BUF = 1040 };
 #define PL_NSEC_PER_SEC 1000000000LL
 #include "pipeline/pipeline.h"
 #include "pipeline/artifact.h"
 #include "pipeline/pipeline_internal.h"
+#include "pipeline/pass_lsp_cross.h"
 #include "pipeline/worker_pool.h"
 #include "graph_buffer/graph_buffer.h"
 #include "store/store.h"
@@ -471,7 +472,20 @@ static void run_predump_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
     }
 }
 
-/* Run the sequential pipeline path: definitions, k8s, calls, usages, semantic. */
+/* Adapter that lets cbm_pipeline_pass_lsp_cross slot into the seq_passes
+ * dispatch table. The cross-file LSP needs the per-file CBMFileResult cache
+ * to read defs/imports without re-extracting; in the sequential path that
+ * cache is ctx->result_cache (set up by run_sequential_pipeline before
+ * launching the dispatch loop). When the cache is unavailable (e.g. if the
+ * pipeline opted out of caching), the pass becomes a no-op since there are
+ * no extracted results to feed cross-file resolution. */
+static int seq_pass_lsp_cross_dispatch(cbm_pipeline_ctx_t *ctx,
+                                       const cbm_file_info_t *files, int file_count) {
+    if (!ctx || !ctx->result_cache) return 0;
+    return cbm_pipeline_pass_lsp_cross(ctx, files, file_count, ctx->result_cache);
+}
+
+/* Run the sequential pipeline path: definitions, k8s, lsp_cross, calls, usages, semantic. */
 static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
                                    const cbm_file_info_t *files, int file_count,
                                    struct timespec *t) {
@@ -493,6 +507,7 @@ static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
     } seq_passes[] = {
         {cbm_pipeline_pass_definitions, "definitions", false},
         {cbm_pipeline_pass_k8s, "k8s", true},
+        {seq_pass_lsp_cross_dispatch, "lsp_cross", true},
         {cbm_pipeline_pass_calls, "calls", false},
         {cbm_pipeline_pass_usages, "usages", false},
         {cbm_pipeline_pass_semantic, "semantic", false},
@@ -557,6 +572,13 @@ static int run_parallel_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         free(cache);
         return rc != 0 ? rc : CBM_NOT_FOUND;
     }
+    /* Cross-file LSP: augments per-file resolved_calls with cross-file
+     * type-aware resolutions before parallel_resolve emits CALLS edges.
+     * Soft-failures only — log and continue. */
+    cbm_clock_gettime(CLOCK_MONOTONIC, t);
+    (void)cbm_pipeline_pass_lsp_cross(ctx, files, file_count, cache);
+    cbm_log_info("pass.timing", "pass", "lsp_cross", "elapsed_ms",
+                 itoa_buf((int)elapsed_ms(*t)));
     cbm_clock_gettime(CLOCK_MONOTONIC, t);
     rc = cbm_parallel_resolve(ctx, files, file_count, cache, &shared_ids, worker_count);
     cbm_log_info("pass.timing", "pass", "parallel_resolve", "elapsed_ms",
@@ -733,12 +755,13 @@ static int run_githistory(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx) {
     }
 
     int gh_edges = 0;
-    if (gh_result.count > 0) {
+    if (gh_result.count > 0 || gh_result.file_temporal_count > 0) {
         gh_edges = cbm_pipeline_githistory_apply(ctx, &gh_result);
     }
     cbm_log_info("pass.done", "pass", "githistory", "commits", itoa_buf(gh_result.commit_count),
                  "edges", itoa_buf(gh_edges));
     free(gh_result.couplings);
+    free(gh_result.file_temporal);
     return 0;
 }
 
@@ -820,6 +843,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     CBM_PROF_START(t_pipeline_total);
     struct timespec t0;
     cbm_clock_gettime(CLOCK_MONOTONIC, &t0);
+    cbm_path_alias_collection_t *path_aliases = NULL;
 
     /* Load user-defined extension overrides (fail-open: NULL on error) */
     CBM_PROF_START(t_userconfig);
@@ -860,6 +884,10 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
     p->gbuf = cbm_gbuf_new(p->project_name, p->repo_path);
     p->registry = cbm_registry_new();
 
+    /* Phase 2b: Load build-tool path aliases (tsconfig/jsconfig today). NULL
+     * when no usable configs are found — non-TS projects pay nothing. */
+    path_aliases = cbm_load_path_aliases(p->repo_path);
+
     /* Build shared context for pass functions */
     cbm_pipeline_ctx_t ctx = {
         .project_name = p->project_name,
@@ -868,6 +896,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
         .registry = p->registry,
         .cancelled = &p->cancelled,
         .mode = (int)p->mode,
+        .path_aliases = path_aliases,
     };
 
     rc = run_extraction_phase(p, &ctx, files, file_count);
@@ -893,6 +922,7 @@ cleanup:
     p->gbuf = NULL;
     cbm_registry_free(p->registry);
     p->registry = NULL;
+    cbm_path_alias_collection_free(path_aliases);
     /* Clear and free user extension config */
     cbm_set_user_lang_config(NULL);
     cbm_userconfig_free(p->userconfig);

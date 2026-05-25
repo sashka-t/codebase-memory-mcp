@@ -142,16 +142,41 @@ static char g_log_ring[LOG_RING_SIZE][LOG_LINE_MAX];
 static int g_log_head = 0;
 static int g_log_count = 0;
 static cbm_mutex_t g_log_mutex;
-static atomic_int g_log_mutex_init = 0;
+
+enum {
+    CBM_LOG_MUTEX_UNINIT = 0,
+    CBM_LOG_MUTEX_INITING = 1,
+    CBM_LOG_MUTEX_INITED = 2
+};
+static atomic_int g_log_mutex_init = CBM_LOG_MUTEX_UNINIT;
+
+/* Safe for concurrent callers: only publishes INITED after cbm_mutex_init()
+ * has completed. Callers that lose the CAS race spin until init finishes. */
+void cbm_ui_log_init(void) {
+    int state = atomic_load(&g_log_mutex_init);
+    if (state == CBM_LOG_MUTEX_INITED)
+        return;
+
+    state = CBM_LOG_MUTEX_UNINIT;
+    if (atomic_compare_exchange_strong(&g_log_mutex_init, &state, CBM_LOG_MUTEX_INITING)) {
+        cbm_mutex_init(&g_log_mutex);
+        atomic_store(&g_log_mutex_init, CBM_LOG_MUTEX_INITED);
+        return;
+    }
+
+    /* Another thread is initializing — spin until done */
+    while (atomic_load(&g_log_mutex_init) != CBM_LOG_MUTEX_INITED) {
+        cbm_usleep(1000); /* 1ms */
+    }
+}
 
 /* Called from a log hook — appends a line to the ring buffer (thread-safe) */
 void cbm_ui_log_append(const char *line) {
     if (!line)
         return;
-    if (!atomic_load(&g_log_mutex_init)) {
-        cbm_mutex_init(&g_log_mutex);
-        atomic_store(&g_log_mutex_init, 1);
-    }
+    /* Ensure mutex is initialized (safe for early single-threaded logging
+     * and concurrent calls via atomic_exchange once-init pattern). */
+    cbm_ui_log_init();
     cbm_mutex_lock(&g_log_mutex);
     snprintf(g_log_ring[g_log_head], LOG_LINE_MAX, "%s", line);
     g_log_head = (g_log_head + 1) % LOG_RING_SIZE;
@@ -793,6 +818,7 @@ static void handle_index_start(struct mg_connection *c, struct mg_http_message *
         mg_http_reply(c, 500, g_cors_json, "{\"error\":\"thread creation failed\"}");
         return;
     }
+    cbm_thread_detach(&tid); /* Don't leak thread handle */
 
     mg_http_reply(c, 202, g_cors_json, "{\"status\":\"indexing\",\"slot\":%d,\"path\":\"%s\"}",
                   slot, job->root_path);
@@ -926,6 +952,28 @@ static int find_cross_repo_targets(cbm_store_t *store, const char *project, char
 
 enum { LAYOUT_MAX_LINKED = 16 };
 #define LAYOUT_GALAXY_SPACING 600.0
+#define LAYOUT_GALAXY_PAD 400.0
+
+/* Bounding-radius of a layout result: max distance from origin across all
+ * nodes. Used to size galaxy spacing so satellites don't overlap the primary
+ * cluster. Layouts with a 1000-node cluster have radius ~1500; the previous
+ * fixed 600 spacing buried satellites inside the primary mass. */
+static double layout_radius(const cbm_layout_result_t *r) {
+    if (!r || r->node_count == 0)
+        return 0.0;
+    double max_r2 = 0.0;
+    for (int i = 0; i < r->node_count; i++) {
+        double x = (double)r->nodes[i].x;
+        double y = (double)r->nodes[i].y;
+        double z = (double)r->nodes[i].z;
+        if (!isfinite(x) || !isfinite(y) || !isfinite(z))
+            continue;
+        double r2 = x * x + y * y + z * z;
+        if (r2 > max_r2)
+            max_r2 = r2;
+    }
+    return sqrt(max_r2);
+}
 
 static void handle_layout(struct mg_connection *c, struct mg_http_message *hm) {
     char project[256] = {0};
@@ -961,26 +1009,32 @@ static void handle_layout(struct mg_connection *c, struct mg_http_message *hm) {
     cbm_layout_result_t *layout =
         cbm_layout_compute(store, project, CBM_LAYOUT_OVERVIEW, NULL, 0, max_nodes);
 
-    /* Find linked projects from CROSS_* edges */
+    /* Find linked projects from CROSS_* edges. Keep `store` open through the
+     * linked-projects loop below so we can resolve target Route QNs against
+     * the linked stores when populating cross_edges. */
     char *linked[LAYOUT_MAX_LINKED];
     int linked_count = find_cross_repo_targets(store, project, linked, LAYOUT_MAX_LINKED);
 
-    cbm_store_close(store);
-
     if (!layout) {
+        cbm_store_close(store);
         mg_http_reply(c, 500, g_cors_json, "{\"error\":\"layout computation failed\"}");
         return;
     }
+
+    /* Capture primary cluster radius before freeing the layout. */
+    double primary_radius = layout_radius(layout);
 
     /* Build JSON: primary layout + linked_projects */
     char *primary_json = cbm_layout_to_json(layout);
     cbm_layout_free(layout);
     if (!primary_json) {
+        cbm_store_close(store);
         mg_http_reply(c, 500, g_cors_json, "{\"error\":\"JSON serialization failed\"}");
         return;
     }
 
     if (linked_count == 0) {
+        cbm_store_close(store);
         mg_http_reply(c, 200, g_cors_json, "%s", primary_json);
         free(primary_json);
         return;
@@ -990,6 +1044,7 @@ static void handle_layout(struct mg_connection *c, struct mg_http_message *hm) {
     yyjson_doc *pdoc = yyjson_read(primary_json, strlen(primary_json), 0);
     free(primary_json);
     if (!pdoc) {
+        cbm_store_close(store);
         mg_http_reply(c, 500, g_cors_json, "{\"error\":\"JSON parse failed\"}");
         return;
     }
@@ -1014,18 +1069,21 @@ static void handle_layout(struct mg_connection *c, struct mg_http_message *hm) {
             continue;
         }
 
+        /* Keep lp_store open through cross_edges resolution below. */
         cbm_layout_result_t *lp_layout =
             cbm_layout_compute(lp_store, linked[li], CBM_LAYOUT_OVERVIEW, NULL, 0, max_nodes);
-        cbm_store_close(lp_store);
 
         if (!lp_layout) {
+            cbm_store_close(lp_store);
             free(linked[li]);
             continue;
         }
 
+        double sat_radius = layout_radius(lp_layout);
         char *lp_json = cbm_layout_to_json(lp_layout);
         cbm_layout_free(lp_layout);
         if (!lp_json) {
+            cbm_store_close(lp_store);
             free(linked[li]);
             continue;
         }
@@ -1034,6 +1092,7 @@ static void handle_layout(struct mg_connection *c, struct mg_http_message *hm) {
         yyjson_doc *lpdoc = yyjson_read(lp_json, strlen(lp_json), 0);
         free(lp_json);
         if (!lpdoc) {
+            cbm_store_close(lp_store);
             free(linked[li]);
             continue;
         }
@@ -1056,22 +1115,85 @@ static void handle_layout(struct mg_connection *c, struct mg_http_message *hm) {
             yyjson_mut_obj_add_val(mdoc, entry, "edges", yyjson_mut_val_mut_copy(mdoc, le));
         }
 
-        /* Compute galaxy offset: evenly spaced around primary */
+        /* Compute galaxy offset: evenly spaced around primary, far enough out
+         * that the primary cluster (radius primary_radius) and the satellite
+         * cluster (radius sat_radius) don't overlap. Bounded below by
+         * LAYOUT_GALAXY_SPACING for trivially small projects. */
         double angle = (2.0 * 3.14159265358979) * (double)li / (double)linked_count;
+        double dist = primary_radius + sat_radius + LAYOUT_GALAXY_PAD;
+        if (dist < LAYOUT_GALAXY_SPACING) {
+            dist = LAYOUT_GALAXY_SPACING;
+        }
         yyjson_mut_val *offset = yyjson_mut_obj(mdoc);
-        yyjson_mut_obj_add_real(mdoc, offset, "x", cos(angle) * LAYOUT_GALAXY_SPACING);
-        yyjson_mut_obj_add_real(mdoc, offset, "y", sin(angle) * LAYOUT_GALAXY_SPACING);
+        yyjson_mut_obj_add_real(mdoc, offset, "x", cos(angle) * dist);
+        yyjson_mut_obj_add_real(mdoc, offset, "y", sin(angle) * dist);
         yyjson_mut_obj_add_real(mdoc, offset, "z", 0.0);
         yyjson_mut_obj_add_val(mdoc, entry, "offset", offset);
 
-        /* TODO: cross_edges array with CROSS_* edges connecting the galaxies */
-        yyjson_mut_obj_add_val(mdoc, entry, "cross_edges", yyjson_mut_arr(mdoc));
+        /* Populate cross_edges connecting primary→this linked galaxy. Each
+         * entry: {source: <primary node id>, target: <linked node id>, type}.
+         *
+         * A CROSS_* edge in the source store points caller_id → local_route_id
+         * (a Route node in the source store). The Route's qualified_name is
+         * canonical and the same Route exists in the linked store too — that's
+         * the cross-repo matching contract. Join edges → nodes in source to
+         * pull the QN, then look it up in the linked store. */
+        yyjson_mut_val *cross_arr = yyjson_mut_arr(mdoc);
+        struct sqlite3 *src_db = cbm_store_get_db(store);
+        struct sqlite3 *lp_db = cbm_store_get_db(lp_store);
+        if (src_db && lp_db) {
+            sqlite3_stmt *eq = NULL;
+            if (sqlite3_prepare_v2(
+                    src_db,
+                    "SELECT e.source_id, e.type, n.qualified_name "
+                    "FROM edges e JOIN nodes n "
+                    "  ON n.id = e.target_id AND n.project = e.project "
+                    "WHERE e.project = ?1 AND e.type LIKE 'CROSS_%' "
+                    "  AND json_extract(e.properties, '$.target_project') = ?2 "
+                    "  AND n.qualified_name IS NOT NULL",
+                    -1, &eq, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(eq, 1, project, -1, SQLITE_STATIC);
+                sqlite3_bind_text(eq, 2, linked[li], -1, SQLITE_STATIC);
 
+                sqlite3_stmt *lookup = NULL;
+                sqlite3_prepare_v2(
+                    lp_db, "SELECT id FROM nodes WHERE qualified_name = ?1 LIMIT 1", -1, &lookup,
+                    NULL);
+
+                while (sqlite3_step(eq) == SQLITE_ROW) {
+                    int64_t src_id = sqlite3_column_int64(eq, 0);
+                    const char *etype = (const char *)sqlite3_column_text(eq, 1);
+                    const char *qn = (const char *)sqlite3_column_text(eq, 2);
+                    if (!qn || !etype || !lookup) {
+                        continue;
+                    }
+                    sqlite3_reset(lookup);
+                    sqlite3_clear_bindings(lookup);
+                    sqlite3_bind_text(lookup, 1, qn, -1, SQLITE_STATIC);
+                    if (sqlite3_step(lookup) != SQLITE_ROW) {
+                        continue;
+                    }
+                    int64_t tgt_id = sqlite3_column_int64(lookup, 0);
+                    yyjson_mut_val *ce = yyjson_mut_obj(mdoc);
+                    yyjson_mut_obj_add_int(mdoc, ce, "source", src_id);
+                    yyjson_mut_obj_add_int(mdoc, ce, "target", tgt_id);
+                    yyjson_mut_obj_add_strcpy(mdoc, ce, "type", etype);
+                    yyjson_mut_arr_append(cross_arr, ce);
+                }
+                if (lookup)
+                    sqlite3_finalize(lookup);
+                sqlite3_finalize(eq);
+            }
+        }
+        yyjson_mut_obj_add_val(mdoc, entry, "cross_edges", cross_arr);
+
+        cbm_store_close(lp_store);
         yyjson_mut_arr_append(lp_arr, entry);
         yyjson_mut_doc_free(lm);
         free(linked[li]);
     }
 
+    cbm_store_close(store);
     yyjson_mut_obj_add_val(mdoc, mroot, "linked_projects", lp_arr);
 
     size_t len = 0;

@@ -11,6 +11,7 @@
 #include "test_helpers.h"
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
+#include "pipeline/pass_lsp_cross.h"
 #include "pipeline/worker_pool.h"
 #include "graph_buffer/graph_buffer.h"
 #include "discover/discover.h"
@@ -136,6 +137,12 @@ static cbm_gbuf_t *run_parallel(const char *project, const char *repo_path, cbm_
     cbm_gbuf_set_next_id(gbuf, atomic_load(&shared_ids));
 
     cbm_build_registry_from_cache(&ctx, files, file_count, result_cache);
+
+    /* Cross-file LSP — mirrors run_parallel_pipeline ordering in pipeline.c.
+     * Augments per-file resolved_calls with cross-file type-aware resolutions
+     * (e.g. method calls on imported classes) before parallel_resolve emits
+     * the call edges. */
+    cbm_pipeline_pass_lsp_cross(&ctx, files, file_count, result_cache);
 
     cbm_parallel_resolve(&ctx, files, file_count, result_cache, &shared_ids, worker_count);
     cbm_gbuf_set_next_id(gbuf, atomic_load(&shared_ids));
@@ -428,6 +435,167 @@ TEST(gbuf_next_id_accessors) {
     PASS();
 }
 
+/* ── Parallel-pipeline LSP-override regression ────────────────────── */
+/* Pin the wiring fix that unified pass_calls.c (sequential) and
+ * pass_parallel.c (parallel) on cbm_pipeline_find_lsp_resolution +
+ * CBM_LSP_CONFIDENCE_FLOOR (lsp_resolve.h). Before the unification, the
+ * parallel path carried its own lsp_override_resolution_pp at floor 0.5
+ * while the sequential path used find_lsp_resolution at floor 0.6, so a
+ * project produced different CALLS edge attributions depending on which
+ * pipeline mode kicked in. This test indexes a small Python repo via
+ * the parallel pipeline and asserts at least one resulting CALLS edge
+ * carries an "lsp_*" strategy — proof the parallel path consults
+ * result->resolved_calls and emits LSP-attributed edges. */
+
+typedef struct {
+    int lsp_strategy_count;
+    int total_calls;
+} lsp_edge_count_ctx_t;
+
+static void count_lsp_call_edges(const cbm_gbuf_edge_t *edge, void *ud) {
+    lsp_edge_count_ctx_t *c = ud;
+    if (!edge || !edge->type || strcmp(edge->type, "CALLS") != 0) {
+        return;
+    }
+    c->total_calls++;
+    if (edge->properties_json && strstr(edge->properties_json, "\"strategy\":\"lsp")) {
+        c->lsp_strategy_count++;
+    }
+}
+
+TEST(parallel_python_lsp_override_emits_lsp_strategy_edges) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_par_pylsp_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir)) {
+        SKIP("mkdtemp failed");
+    }
+
+    /* Single-file scenario: pins the in-file LSP path where py_lsp
+     * registers Greeter from the file's own defs, types `g = Greeter()`
+     * as NAMED("…Greeter"), and resolves `g.hello()` to Greeter.hello
+     * via attribute lookup. callee_qn matches the gbuf QN directly. The
+     * cross-file equivalent is covered by
+     * parallel_python_lsp_override_cross_file_emits_lsp_strategy_edges,
+     * which exercises the project-prefix fallback in
+     * cbm_pipeline_lsp_target_node. */
+    char fpath0[512];
+    snprintf(fpath0, sizeof(fpath0), "%s/app.py", tmpdir);
+    FILE *f = fopen(fpath0, "w");
+    if (!f) {
+        SKIP("fopen app.py failed");
+    }
+    fprintf(f, "class Greeter:\n"
+               "    def hello(self):\n"
+               "        return 'hi'\n"
+               "\n"
+               "def main():\n"
+               "    g = Greeter()\n"
+               "    g.hello()\n");
+    fclose(f);
+
+    cbm_file_info_t files[1] = {0};
+    files[0].path     = fpath0;
+    files[0].rel_path = (char *)"app.py";
+    files[0].language = CBM_LANG_PYTHON;
+
+    cbm_gbuf_t *gbuf = run_parallel("cbm_par_pylsp", tmpdir, files, 1, 1);
+    ASSERT_NOT_NULL(gbuf);
+
+    lsp_edge_count_ctx_t c = {0};
+    cbm_gbuf_foreach_edge(gbuf, count_lsp_call_edges, &c);
+
+    /* Sanity: extraction produced at least one call edge. */
+    ASSERT_GT(c.total_calls, 0);
+    /* The parallel pipeline must surface at least one LSP-attributed
+     * CALLS edge. This proves the unified cbm_pipeline_find_lsp_resolution
+     * (shared with pass_calls.c at floor 0.6) is actually consulted in
+     * the parallel pipeline, and that the resulting edge is emitted with
+     * the LSP strategy intact rather than overwritten by the registry
+     * fallback. */
+    ASSERT_GT(c.lsp_strategy_count, 0);
+
+    cbm_gbuf_free(gbuf);
+
+    unlink(fpath0);
+    rmdir(tmpdir);
+    PASS();
+}
+
+/* Cross-file regression for the QN-mismatch bug: py_lsp's per-file mode
+ * emits resolved_calls.callee_qn as the raw import-module path (e.g.
+ * `greeter.Greeter` from `from greeter import Greeter`) rather than the
+ * project-qualified QN the gbuf stores (`<project>.greeter.Greeter`).
+ * Before cbm_pipeline_lsp_target_node added the project-prefix fallback,
+ * the LSP match succeeded (lsp_overrides counter incremented) but the
+ * downstream cbm_gbuf_find_by_qn lookup missed silently, dropping the
+ * edge. With the fallback in place, the cross-file `g.hello()` call is
+ * attributed to <project>.greeter.Greeter.hello with an lsp_* strategy.
+ *
+ * Two-file scenario: greeter.py defines Greeter; app.py imports it and
+ * calls hello() — same shape as the original failing reproduction. */
+TEST(parallel_python_lsp_override_cross_file_emits_lsp_strategy_edges) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_par_pylsp_xf_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir)) {
+        SKIP("mkdtemp failed");
+    }
+
+    char gpath[512];
+    snprintf(gpath, sizeof(gpath), "%s/greeter.py", tmpdir);
+    FILE *gf = fopen(gpath, "w");
+    if (!gf) {
+        SKIP("fopen greeter.py failed");
+    }
+    fprintf(gf, "class Greeter:\n"
+                "    def hello(self):\n"
+                "        return 'hi'\n");
+    fclose(gf);
+
+    char apath[512];
+    snprintf(apath, sizeof(apath), "%s/app.py", tmpdir);
+    FILE *af = fopen(apath, "w");
+    if (!af) {
+        unlink(gpath);
+        rmdir(tmpdir);
+        SKIP("fopen app.py failed");
+    }
+    fprintf(af, "from greeter import Greeter\n"
+                "\n"
+                "def main():\n"
+                "    g = Greeter()\n"
+                "    g.hello()\n");
+    fclose(af);
+
+    cbm_file_info_t files[2] = {0};
+    files[0].path     = gpath;
+    files[0].rel_path = (char *)"greeter.py";
+    files[0].language = CBM_LANG_PYTHON;
+    files[1].path     = apath;
+    files[1].rel_path = (char *)"app.py";
+    files[1].language = CBM_LANG_PYTHON;
+
+    cbm_gbuf_t *gbuf = run_parallel("cbm_par_pylsp_xf", tmpdir, files, 2, 2);
+    ASSERT_NOT_NULL(gbuf);
+
+    lsp_edge_count_ctx_t c = {0};
+    cbm_gbuf_foreach_edge(gbuf, count_lsp_call_edges, &c);
+
+    ASSERT_GT(c.total_calls, 0);
+    /* The cross-file LSP override must produce at least one lsp_*
+     * CALLS edge. Without the project-prefix fallback in
+     * cbm_pipeline_lsp_target_node this assertion would fail because the
+     * raw module-path callee_qn doesn't match the project-qualified
+     * gbuf node QN. */
+    ASSERT_GT(c.lsp_strategy_count, 0);
+
+    cbm_gbuf_free(gbuf);
+
+    unlink(apath);
+    unlink(gpath);
+    rmdir(tmpdir);
+    PASS();
+}
+
 /* ── Suite Registration ──────────────────────────────────────────── */
 
 SUITE(parallel) {
@@ -441,6 +609,8 @@ SUITE(parallel) {
 
     /* Parallel pipeline parity tests */
     RUN_TEST(parallel_node_count);
+    RUN_TEST(parallel_python_lsp_override_emits_lsp_strategy_edges);
+    RUN_TEST(parallel_python_lsp_override_cross_file_emits_lsp_strategy_edges);
     RUN_TEST(parallel_calls_parity);
     RUN_TEST(parallel_defines_parity);
     RUN_TEST(parallel_defines_method_parity);

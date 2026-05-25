@@ -30,6 +30,7 @@ enum {
 enum { PP_CSHARP_M_PREFIX_LEN = 2 };
 #include "pipeline/pipeline.h"
 #include "pipeline/pipeline_internal.h"
+#include "pipeline/lsp_resolve.h"
 #include "pipeline/worker_pool.h"
 #include "foundation/compat.h"
 #include "foundation/compat_thread.h"
@@ -816,7 +817,12 @@ typedef struct __attribute__((aligned(CBM_CACHE_LINE))) {
     int usages_resolved;
     int semantic_resolved;
     int errors;
-    char _pad[CBM_CACHE_LINE - sizeof(cbm_gbuf_t *) - (PP_RING * sizeof(int))];
+    /* Subset of calls_resolved that were attributed via the LSP-override
+     * path (cbm_pipeline_find_lsp_resolution hit) rather than the
+     * registry's textual matcher. Surfaced in the parallel.resolve.done
+     * log line so divergence between pipelines becomes observable. */
+    int lsp_overrides;
+    char _pad[CBM_CACHE_LINE - sizeof(cbm_gbuf_t *) - ((PP_RING + 1) * sizeof(int))];
 } resolve_worker_state_t;
 
 typedef struct {
@@ -1462,8 +1468,34 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
             continue;
         }
 
-        cbm_resolution_t res = cbm_registry_resolve(rc->registry, call->callee_name, module_qn,
-                                                    imp_keys, imp_vals, imp_count);
+        /* LSP-resolved calls take precedence over registry textual matching.
+         * Same helper + same CBM_LSP_CONFIDENCE_FLOOR as the sequential
+         * pipeline (pass_calls.c) — both paths must admit the same set of
+         * LSP overrides so a project doesn't get different attributions
+         * depending on whether parallel mode kicked in. */
+        cbm_resolution_t res = {0};
+        const CBMResolvedCall *lsp =
+            cbm_pipeline_find_lsp_resolution(&result->resolved_calls, call);
+        if (lsp) {
+            /* Canonicalise to the gbuf node's QN so res.qualified_name matches
+             * the gbuf even when the cross-file fallback had to prefix the
+             * project name. If neither lookup hits, leave res.qualified_name
+             * empty — the LSP was confident but its target isn't in the gbuf
+             * (external/unindexed), so drop the edge rather than fall back to
+             * the registry resolver, matching prior single-lookup semantics. */
+            const cbm_gbuf_node_t *lsp_target =
+                cbm_pipeline_lsp_target_node(rc->main_gbuf, rc->project_name, lsp->callee_qn);
+            if (lsp_target) {
+                res.qualified_name = lsp_target->qualified_name;
+                res.strategy = lsp->strategy ? lsp->strategy : "lsp_override";
+                res.confidence = (double)lsp->confidence;
+                res.candidate_count = 1;
+                ws->lsp_overrides++;
+            }
+        } else {
+            res = cbm_registry_resolve(rc->registry, call->callee_name, module_qn,
+                                       imp_keys, imp_vals, imp_count);
+        }
 
         try_field_type_hint(rc, &res, call->callee_name, source_node->id);
 
@@ -1615,6 +1647,9 @@ static void resolve_def_decorators(resolve_ctx_t *rc, resolve_worker_state_t *ws
             char dp[CBM_SZ_256];
             snprintf(dp, sizeof(dp), "{\"decorator\":\"%s\"}", def->decorators[dc]);
             cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, dn->id, "DECORATES", dp);
+            /* Ensure a reference-style edge exists so the decorator appears in queries
+             * without being misclassified as a real call by downstream passes. */
+            cbm_gbuf_insert_edge(ws->local_edge_buf, node->id, dn->id, "USAGE", "{}");
             ws->semantic_resolved++;
         }
     }
@@ -1761,12 +1796,14 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     int total_calls = 0;
     int total_usages = 0;
     int total_semantic = 0;
+    int total_lsp_overrides = 0;
     for (int i = 0; i < worker_count; i++) {
         if (workers[i].local_edge_buf) {
             cbm_gbuf_merge(ctx->gbuf, workers[i].local_edge_buf);
             total_calls += workers[i].calls_resolved;
             total_usages += workers[i].usages_resolved;
             total_semantic += workers[i].semantic_resolved;
+            total_lsp_overrides += workers[i].lsp_overrides;
             cbm_gbuf_free(workers[i].local_edge_buf);
         }
     }
@@ -1783,6 +1820,7 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
     }
 
     cbm_log_info("parallel.resolve.done", "calls", itoa_log(total_calls), "usages",
-                 itoa_log(total_usages), "semantic", itoa_log(total_semantic + go_impl));
+                 itoa_log(total_usages), "semantic", itoa_log(total_semantic + go_impl),
+                 "lsp_overrides", itoa_log(total_lsp_overrides));
     return 0;
 }

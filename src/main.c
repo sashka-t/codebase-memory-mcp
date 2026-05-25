@@ -281,6 +281,10 @@ static int handle_subcommand(int argc, char **argv) {
             cbm_mem_init(MAIN_RAM_FRACTION);
             return run_cli(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
         }
+        if (strcmp(argv[i], "hook-augment") == 0) {
+            cbm_mem_init(MAIN_RAM_FRACTION);
+            return cbm_cmd_hook_augment();
+        }
         if (strcmp(argv[i], "install") == 0) {
             return cbm_cmd_install(argc - i - SKIP_ONE, argv + i + SKIP_ONE);
         }
@@ -375,6 +379,9 @@ int main(int argc, char **argv) {
     }
 
     /* Create and start watcher in background thread */
+    /* Initialize log mutex before any threads are created */
+    cbm_ui_log_init();
+
     cbm_store_t *watch_store = cbm_store_open_memory();
     g_watcher = cbm_watcher_new(watch_store, watcher_index_fn, NULL);
 

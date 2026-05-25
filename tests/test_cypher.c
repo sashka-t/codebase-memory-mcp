@@ -78,6 +78,32 @@ TEST(cypher_lex_single_quote_string) {
     PASS();
 }
 
+TEST(cypher_lex_string_overflow) {
+    /* Build a string literal longer than 4096 bytes to verify we don't
+     * overflow the stack buffer in lex_string_literal. */
+    const int big = 5000;
+    /* query: "AAAA...A"  (quotes included) */
+    char *query = malloc(big + 3); /* quote + big chars + quote + NUL */
+    ASSERT_NOT_NULL(query);
+    query[0] = '"';
+    memset(query + 1, 'A', big);
+    query[big + 1] = '"';
+    query[big + 2] = '\0';
+
+    cbm_lex_result_t r = {0};
+    int rc = cbm_lex(query, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_NULL(r.error);
+    ASSERT_GTE(r.count, 1);
+    ASSERT_EQ(r.tokens[0].type, TOK_STRING);
+    /* The string should be truncated to CBM_SZ_4K - 1 (4095) characters. */
+    ASSERT_EQ((int)strlen(r.tokens[0].text), 4095);
+
+    cbm_lex_free(&r);
+    free(query);
+    PASS();
+}
+
 TEST(cypher_lex_number) {
     cbm_lex_result_t r = {0};
     int rc = cbm_lex("42 3.14", &r);
@@ -994,6 +1020,30 @@ TEST(cypher_edge_filter_numeric_gte) {
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(r.row_count, 1);
     ASSERT_STR_EQ(cypher_get_col(&r, 0, "b.name"), "HandleOrder");
+
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+TEST(cypher_bare_edge_return_exposes_properties_json) {
+    /* `RETURN r` on an edge variable, with no property accessor, should
+     * surface the edge's full properties JSON (or "{}"). Before the fix,
+     * binding_get_virtual returned an empty string, which made bare edge
+     * returns useless for callers that wanted to inspect timestamps,
+     * weights, etc. without naming each property up front. */
+    cbm_store_t *s = setup_cypher_multi_edge_store();
+    cbm_cypher_result_t r = {0};
+
+    int rc = cbm_cypher_execute(
+        s, "MATCH (a)-[r:HTTP_CALLS]->(b) WHERE r.method = 'POST' RETURN r", "testproj", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    const char *r_val = cypher_get_col(&r, 0, "r");
+    ASSERT_NOT_NULL(r_val);
+    /* Expect JSON object content rather than the previous empty string. */
+    ASSERT_NOT_NULL(strstr(r_val, "url_path"));
+    ASSERT_NOT_NULL(strstr(r_val, "/api/orders"));
 
     cbm_cypher_result_free(&r);
     cbm_store_close(s);
@@ -2064,6 +2114,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_lex_relationship);
     RUN_TEST(cypher_lex_string_literal);
     RUN_TEST(cypher_lex_single_quote_string);
+    RUN_TEST(cypher_lex_string_overflow);
     RUN_TEST(cypher_lex_number);
     RUN_TEST(cypher_lex_operators);
     RUN_TEST(cypher_lex_keywords_case_insensitive);
@@ -2115,6 +2166,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_edge_type_prop);
     RUN_TEST(cypher_edge_filter_contains);
     RUN_TEST(cypher_edge_filter_numeric_gte);
+    RUN_TEST(cypher_bare_edge_return_exposes_properties_json);
     RUN_TEST(cypher_edge_return_without_filter);
     RUN_TEST(cypher_edge_filter_equals);
     RUN_TEST(cypher_edge_filter_starts_with);

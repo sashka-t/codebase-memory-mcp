@@ -100,7 +100,7 @@ YAMLEOF
 RESULT=$(cli index_repository "{\"repo_path\":\"$TMPDIR\"}")
 echo "$RESULT"
 
-STATUS=$(echo "$RESULT" | python3 -c "import json,sys; d=json.loads(json.loads(sys.stdin.read())['content'][0]['text']); print(d.get('status',''))" 2>/dev/null || echo "")
+STATUS=$(echo "$RESULT" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('status',''))" 2>/dev/null || echo "")
 if [ "$STATUS" != "indexed" ]; then
   echo "FAIL: index status is '$STATUS', expected 'indexed'"
   echo "--- stderr ---"
@@ -109,8 +109,8 @@ if [ "$STATUS" != "indexed" ]; then
   exit 1
 fi
 
-NODES=$(echo "$RESULT" | python3 -c "import json,sys; d=json.loads(json.loads(sys.stdin.read())['content'][0]['text']); print(d.get('nodes',0))" 2>/dev/null || echo "0")
-EDGES=$(echo "$RESULT" | python3 -c "import json,sys; d=json.loads(json.loads(sys.stdin.read())['content'][0]['text']); print(d.get('edges',0))" 2>/dev/null || echo "0")
+NODES=$(echo "$RESULT" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('nodes',0))" 2>/dev/null || echo "0")
+EDGES=$(echo "$RESULT" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('edges',0))" 2>/dev/null || echo "0")
 
 echo "nodes=$NODES edges=$EDGES"
 
@@ -128,10 +128,10 @@ echo ""
 echo "=== Phase 3: verify queries ==="
 
 # 3a: search_graph — find the compute function
-PROJECT=$(echo "$RESULT" | python3 -c "import json,sys; d=json.loads(json.loads(sys.stdin.read())['content'][0]['text']); print(d.get('project',''))" 2>/dev/null || echo "")
+PROJECT=$(echo "$RESULT" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('project',''))" 2>/dev/null || echo "")
 
 SEARCH=$(cli search_graph "{\"project\":\"$PROJECT\",\"name_pattern\":\"compute\"}")
-TOTAL=$(echo "$SEARCH" | python3 -c "import json,sys; d=json.loads(json.loads(sys.stdin.read())['content'][0]['text']); print(d.get('total',0))" 2>/dev/null || echo "0")
+TOTAL=$(echo "$SEARCH" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('total',0))" 2>/dev/null || echo "0")
 if [ "$TOTAL" -lt 1 ]; then
   echo "FAIL: search_graph for 'compute' returned 0 results"
   exit 1
@@ -140,7 +140,7 @@ echo "OK: search_graph found $TOTAL result(s) for 'compute'"
 
 # 3b: trace_path — verify compute has callers
 TRACE=$(cli trace_path "{\"project\":\"$PROJECT\",\"function_name\":\"compute\",\"direction\":\"inbound\",\"depth\":1}")
-CALLERS=$(echo "$TRACE" | python3 -c "import json,sys; d=json.loads(json.loads(sys.stdin.read())['content'][0]['text']); print(len(d.get('callers',[])))" 2>/dev/null || echo "0")
+CALLERS=$(echo "$TRACE" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(len(d.get('callers',[])))" 2>/dev/null || echo "0")
 if [ "$CALLERS" -lt 1 ]; then
   echo "FAIL: trace_path found 0 callers for 'compute'"
   exit 1
@@ -149,7 +149,7 @@ echo "OK: trace_path found $CALLERS caller(s) for 'compute'"
 
 # 3c: get_graph_schema — verify labels exist
 SCHEMA=$(cli get_graph_schema "{\"project\":\"$PROJECT\"}")
-LABELS=$(echo "$SCHEMA" | python3 -c "import json,sys; d=json.loads(json.loads(sys.stdin.read())['content'][0]['text']); print(len(d.get('node_labels',[])))" 2>/dev/null || echo "0")
+LABELS=$(echo "$SCHEMA" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(len(d.get('node_labels',[])))" 2>/dev/null || echo "0")
 if [ "$LABELS" -lt 3 ]; then
   echo "FAIL: schema has fewer than 3 node labels"
   exit 1
@@ -158,7 +158,7 @@ echo "OK: schema has $LABELS node labels"
 
 # 3d: Verify __init__.py didn't clobber Folder node
 FOLDERS=$(cli search_graph "{\"project\":\"$PROJECT\",\"label\":\"Folder\"}")
-FOLDER_COUNT=$(echo "$FOLDERS" | python3 -c "import json,sys; d=json.loads(json.loads(sys.stdin.read())['content'][0]['text']); print(d.get('total',0))" 2>/dev/null || echo "0")
+FOLDER_COUNT=$(echo "$FOLDERS" | python3 -c "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('total',0))" 2>/dev/null || echo "0")
 if [ "$FOLDER_COUNT" -lt 2 ]; then
   echo "FAIL: expected at least 2 Folder nodes (src, src/pkg), got $FOLDER_COUNT"
   exit 1
@@ -569,26 +569,38 @@ if ! path_match "$CMD" "$SELF_PATH"; then
 fi
 echo "OK 8c: Claude Code MCP (.claude/.mcp.json)"
 
-# 8d: Claude Code hooks
+# 8d: Claude Code hooks — matcher must be exactly "Grep|Glob" (no Read, no Search).
+# Gating Read breaks Claude Code's read-before-edit invariant (issue #362), so
+# this assertion locks in the matcher to prevent regressions.
 if ! cat "$FAKE_HOME/.claude/settings.json" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 hooks = d.get('hooks', {}).get('PreToolUse', [])
-found = any('Grep' in str(h.get('matcher', '')) for h in hooks)
-sys.exit(0 if found else 1)
+ok = any(h.get('matcher') == 'Grep|Glob' for h in hooks)
+bad = any('Read' in str(h.get('matcher', '')) for h in hooks)
+sys.exit(0 if (ok and not bad) else 1)
 " 2>/dev/null; then
-  echo "FAIL 8d: PreToolUse hook not found in settings.json"
+  echo "FAIL 8d: PreToolUse hook matcher is not exactly 'Grep|Glob' (or still contains Read)"
   exit 1
 fi
-echo "OK 8d: Claude Code PreToolUse hook"
+echo "OK 8d: Claude Code PreToolUse hook (matcher=Grep|Glob, Read excluded)"
 
-# 8e: Claude Code gate script
+# 8e: Claude Code shim script — must be non-blocking augmenter, not a gate.
 if [ "$(uname -s)" != "MINGW64_NT" ] 2>/dev/null; then
-  if [ ! -x "$FAKE_HOME/.claude/hooks/cbm-code-discovery-gate" ]; then
-    echo "FAIL 8e: gate script not executable or missing"
+  GATE_SCRIPT="$FAKE_HOME/.claude/hooks/cbm-code-discovery-gate"
+  if [ ! -x "$GATE_SCRIPT" ]; then
+    echo "FAIL 8e: shim script not executable or missing"
     exit 1
   fi
-  echo "OK 8e: gate script installed and executable"
+  if grep -q 'exit 2' "$GATE_SCRIPT"; then
+    echo "FAIL 8e: shim contains 'exit 2' — must never block"
+    exit 1
+  fi
+  if ! grep -q 'hook-augment' "$GATE_SCRIPT"; then
+    echo "FAIL 8e: shim missing 'hook-augment' delegation"
+    exit 1
+  fi
+  echo "OK 8e: shim installed, non-blocking, delegates to hook-augment"
 fi
 
 # 8f-8h: Codex TOML
@@ -626,12 +638,17 @@ if ! cat "$FAKE_HOME/.gemini/settings.json" 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 hooks = d.get('hooks', {}).get('BeforeTool', [])
-sys.exit(0 if len(hooks) > 0 else 1)
+# Matcher must be exactly 'google_search|grep_search' (no read_file). The
+# old matcher gated the agent's read tool — consistent with the Claude fix
+# we remove it here too.
+ok = any(h.get('matcher') == 'google_search|grep_search' for h in hooks)
+bad = any('read_file' in str(h.get('matcher', '')) for h in hooks)
+sys.exit(0 if (ok and not bad) else 1)
 " 2>/dev/null; then
-  echo "FAIL 8l: Gemini BeforeTool hook missing"
+  echo "FAIL 8l: Gemini BeforeTool hook matcher must be 'google_search|grep_search' (no read_file)"
   exit 1
 fi
-echo "OK 8l: Gemini BeforeTool hook"
+echo "OK 8l: Gemini BeforeTool hook (matcher=google_search|grep_search)"
 
 # 8m: Gemini instructions
 if [ ! -f "$FAKE_HOME/.gemini/GEMINI.md" ]; then

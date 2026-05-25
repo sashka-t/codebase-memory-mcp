@@ -40,7 +40,9 @@ enum {
     ST_GLOB_MIN_LEN = 3,
     ST_GLOB_SKIP = 2,
     ST_MAX_LANG = 10,
-    ST_SEARCH_MAX_BINDS = 16,
+    ST_SEARCH_MAX_BINDS = 32, /* increased: LIKE pre-filter adds binds per pattern */
+    ST_LIKE_POOL_MAX = 12,    /* max malloc'd LIKE strings alive during one search */
+    ST_LIKE_HINT_MAX = 2,     /* max LIKE hints extracted per regex pattern */
     ST_MAX_PKGS = 64,
     ST_INIT_CAP_4 = 4,
     ST_HEADER_PREFIX = 3,
@@ -297,6 +299,24 @@ static int create_user_indexes(cbm_store_t *s) {
     return exec_sql(s, sql);
 }
 
+int64_t cbm_store_resolve_mmap_size(void) {
+    enum { MMAP_DEFAULT = 67108864, BASE_10 = 10 }; /* default 64 MB; decimal radix */
+    char buf[ST_BUF_64];
+    if (cbm_safe_getenv("CBM_SQLITE_MMAP_SIZE", buf, sizeof(buf), NULL) == NULL) {
+        return (int64_t)MMAP_DEFAULT;
+    }
+    char *end = NULL;
+    long long parsed = strtoll(buf, &end, BASE_10);
+    if (end == buf || *end != '\0') {
+        /* Malformed — fall back to default rather than fail the store open. */
+        return (int64_t)MMAP_DEFAULT;
+    }
+    if (parsed < 0) {
+        return 0;
+    }
+    return (int64_t)parsed;
+}
+
 static int configure_pragmas(cbm_store_t *s, bool in_memory) {
     int rc;
     rc = exec_sql(s, "PRAGMA foreign_keys = ON;");
@@ -323,7 +343,10 @@ static int configure_pragmas(cbm_store_t *s, bool in_memory) {
         if (rc != CBM_STORE_OK) {
             return rc;
         }
-        rc = exec_sql(s, "PRAGMA mmap_size = 67108864;"); /* CBM_SZ_64 MB */
+        char mmap_sql[ST_BUF_64];
+        snprintf(mmap_sql, sizeof(mmap_sql), "PRAGMA mmap_size = %lld;",
+                 (long long)cbm_store_resolve_mmap_size());
+        rc = exec_sql(s, mmap_sql);
     }
     return rc;
 }
@@ -409,47 +432,63 @@ static void sqlite_camel_split(sqlite3_context *ctx, int argc, sqlite3_value **a
 
 /* ── REGEXP function for SQLite ──────────────────────────────────── */
 
+/* Destructor passed to sqlite3_set_auxdata — frees the cached compiled regex. */
+static void regex_free_cb(void *p) {
+    cbm_regex_t *re = (cbm_regex_t *)p;
+    cbm_regfree(re);
+    free(re);
+}
+
+/* Cache the compiled regex on argument slot 0 for the lifetime of the statement.
+ * sqlite3_get_auxdata returns the cached pointer on subsequent rows (same parameter
+ * value), so cbm_regcomp is called exactly once per statement instead of once per row. */
 static void sqlite_regexp(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     (void)argc;
     const char *pattern = (const char *)sqlite3_value_text(argv[0]);
-    const char *text = (const char *)sqlite3_value_text(argv[SKIP_ONE]);
+    const char *text    = (const char *)sqlite3_value_text(argv[SKIP_ONE]);
     if (!pattern || !text) {
         sqlite3_result_int(ctx, 0);
         return;
     }
 
-    cbm_regex_t re;
-    int rc = cbm_regcomp(&re, pattern, CBM_REG_EXTENDED | CBM_REG_NOSUB);
-    if (rc != 0) {
-        sqlite3_result_error(ctx, "invalid regex", CBM_NOT_FOUND);
-        return;
+    cbm_regex_t *re = (cbm_regex_t *)sqlite3_get_auxdata(ctx, 0);
+    if (!re) {
+        re = malloc(sizeof(cbm_regex_t));
+        if (!re) { sqlite3_result_error_nomem(ctx); return; }
+        if (cbm_regcomp(re, pattern, CBM_REG_EXTENDED | CBM_REG_NOSUB) != 0) {
+            free(re);
+            sqlite3_result_error(ctx, "invalid regex", CBM_NOT_FOUND);
+            return;
+        }
+        sqlite3_set_auxdata(ctx, 0, re, regex_free_cb);
     }
 
-    rc = cbm_regexec(&re, text, 0, NULL, 0);
-    cbm_regfree(&re);
-    sqlite3_result_int(ctx, rc == 0 ? SKIP_ONE : 0);
+    sqlite3_result_int(ctx, cbm_regexec(re, text, 0, NULL, 0) == 0 ? SKIP_ONE : 0);
 }
 
-/* Case-insensitive REGEXP variant */
+/* Case-insensitive REGEXP variant — same auxdata caching strategy. */
 static void sqlite_iregexp(sqlite3_context *ctx, int argc, sqlite3_value **argv) {
     (void)argc;
     const char *pattern = (const char *)sqlite3_value_text(argv[0]);
-    const char *text = (const char *)sqlite3_value_text(argv[SKIP_ONE]);
+    const char *text    = (const char *)sqlite3_value_text(argv[SKIP_ONE]);
     if (!pattern || !text) {
         sqlite3_result_int(ctx, 0);
         return;
     }
 
-    cbm_regex_t re;
-    int rc = cbm_regcomp(&re, pattern, CBM_REG_EXTENDED | CBM_REG_NOSUB | CBM_REG_ICASE);
-    if (rc != 0) {
-        sqlite3_result_error(ctx, "invalid regex", CBM_NOT_FOUND);
-        return;
+    cbm_regex_t *re = (cbm_regex_t *)sqlite3_get_auxdata(ctx, 0);
+    if (!re) {
+        re = malloc(sizeof(cbm_regex_t));
+        if (!re) { sqlite3_result_error_nomem(ctx); return; }
+        if (cbm_regcomp(re, pattern, CBM_REG_EXTENDED | CBM_REG_NOSUB | CBM_REG_ICASE) != 0) {
+            free(re);
+            sqlite3_result_error(ctx, "invalid regex", CBM_NOT_FOUND);
+            return;
+        }
+        sqlite3_set_auxdata(ctx, 0, re, regex_free_cb);
     }
 
-    rc = cbm_regexec(&re, text, 0, NULL, 0);
-    cbm_regfree(&re);
-    sqlite3_result_int(ctx, rc == 0 ? SKIP_ONE : 0);
+    sqlite3_result_int(ctx, cbm_regexec(re, text, 0, NULL, 0) == 0 ? SKIP_ONE : 0);
 }
 
 /* Cosine similarity between two int8 BLOB vectors.
@@ -542,7 +581,7 @@ static cbm_store_t *store_open_internal(const char *path, bool in_memory) {
     if (configure_pragmas(s, in_memory) != CBM_STORE_OK || init_schema(s) != CBM_STORE_OK ||
         create_user_indexes(s) != CBM_STORE_OK) {
         sqlite3_close(s->db);
-        free((void *)s->db_path);
+        safe_str_free(&s->db_path);
         free(s);
         return NULL;
     }
@@ -597,7 +636,7 @@ cbm_store_t *cbm_store_open_path_query(const char *db_path) {
 
     if (configure_pragmas(s, false) != CBM_STORE_OK) {
         sqlite3_close(s->db);
-        free((void *)s->db_path);
+        safe_str_free(&s->db_path);
         free(s);
         return NULL;
     }
@@ -639,7 +678,8 @@ bool cbm_store_check_integrity(cbm_store_t *s) {
         rc = sqlite3_prepare_v2(
             s->db,
             "SELECT root_path FROM projects WHERE root_path != '' "
-            "AND substr(root_path, 1, 1) NOT IN ('/', 'A','B','C','D','E','F','G','H') LIMIT 1;",
+            "AND NOT (substr(root_path, 1, 1) = '/' "
+            "OR (substr(root_path, 1, 1) BETWEEN 'A' AND 'Z')) LIMIT 1;",
             CBM_NOT_FOUND, &stmt, NULL);
         if (rc == SQLITE_OK) {
             if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -718,7 +758,7 @@ void cbm_store_close(cbm_store_t *s) {
     /* Use sqlite3_close_v2 — auto-deallocates when last statement finalizes.
      * Prevents ASan false-positive leaks from sqlite3 internal state. */
     sqlite3_close_v2(s->db);
-    free((void *)s->db_path);
+    safe_str_free(&s->db_path);
     free(s);
 }
 
@@ -790,7 +830,13 @@ int cbm_store_create_indexes(cbm_store_t *s) {
 /* ── Checkpoint ─────────────────────────────────────────────────── */
 
 int cbm_store_checkpoint(cbm_store_t *s) {
-    int rc = sqlite3_wal_checkpoint_v2(s->db, NULL, SQLITE_CHECKPOINT_TRUNCATE, NULL, NULL);
+    /* PASSIVE never blocks readers and never ftruncate()s either file.
+     * SQLite recommends PASSIVE for shared databases — TRUNCATE shrinks
+     * the WAL via ftruncate(fd, 0) on success, which on macOS can raise
+     * SIGBUS in a sibling process that has the DB mmap'd through SQLite
+     * when it next faults a page in the now-shorter region.
+     * See https://www.sqlite.org/c3ref/c_checkpoint_full.html */
+    int rc = sqlite3_wal_checkpoint_v2(s->db, NULL, SQLITE_CHECKPOINT_PASSIVE, NULL, NULL);
     if (rc != SQLITE_OK) {
         store_set_error_sqlite(s, "checkpoint");
         return CBM_STORE_ERR;
@@ -2121,6 +2167,41 @@ typedef struct {
     const char *text;
 } search_bind_t;
 
+/* Pool of malloc'd strings that must outlive statement execution.
+ * Freed in one shot after both statements are finalized. */
+typedef struct {
+    char *ptrs[ST_LIKE_POOL_MAX];
+    int   count;
+} search_like_pool_t;
+
+static void like_pool_add(search_like_pool_t *pool, char *ptr) {
+    if (ptr && pool->count < ST_LIKE_POOL_MAX) {
+        pool->ptrs[pool->count++] = ptr;
+    } else {
+        free(ptr); /* pool full — don't leak */
+    }
+}
+
+static void like_pool_free(search_like_pool_t *pool) {
+    for (int i = 0; i < pool->count; i++) {
+        free(pool->ptrs[i]);
+    }
+    pool->count = 0;
+}
+
+/* Wrap a literal string in % for use as a LIKE pattern (%literal%). */
+static char *make_like_hint(const char *literal) {
+    size_t len = strlen(literal);
+    char *buf = malloc(len + 3); /* % + literal + % + NUL */
+    if (buf) {
+        buf[0] = '%';
+        memcpy(buf + SKIP_ONE, literal, len);
+        buf[len + SKIP_ONE] = '%';
+        buf[len + 2] = '\0';
+    }
+    return buf;
+}
+
 static void search_apply_degree_filter(char *sql, size_t sql_sz, const cbm_search_params_t *p) {
     bool has_degree_filter = (p->min_degree >= 0 || p->max_degree >= 0);
     if (!has_degree_filter) {
@@ -2191,10 +2272,31 @@ static void where_add_regex(char *where, int where_sz, int *wlen, int *nparams,
     where_bind_text(binds, bind_idx, pattern);
 }
 
+/* Prepend LIKE pre-filter conditions for literal segments of a regex pattern.
+ * The idx_nodes_name index satisfies LIKE '%literal%', cutting the rows that
+ * reach the (more expensive) iregexp call to only those containing the literal.
+ * cbm_extract_like_hints bails on alternation, so no false negatives. */
+static void where_add_like_hints(const char *column, const char *pattern, char *where,
+                                  int where_sz, int *wlen, int *nparams, search_bind_t *binds,
+                                  int *bind_idx, search_like_pool_t *pool) {
+    char *hints[ST_LIKE_HINT_MAX];
+    int nhints = cbm_extract_like_hints(pattern, hints, ST_LIKE_HINT_MAX);
+    char bind_buf[CBM_SZ_64];
+    for (int i = 0; i < nhints; i++) {
+        char *lp = make_like_hint(hints[i]);
+        free(hints[i]);
+        if (!lp) continue;
+        like_pool_add(pool, lp);
+        snprintf(bind_buf, sizeof(bind_buf), "%s LIKE ?%d", column, *bind_idx + SKIP_ONE);
+        *wlen = where_append(where, where_sz, *wlen, nparams, bind_buf);
+        where_bind_text(binds, bind_idx, lp);
+    }
+}
+
 /* Build basic WHERE clauses: project, label, name, file, qn patterns. */
 static int search_where_basic(const cbm_search_params_t *params, char *where, int where_sz,
                               int *wlen, int *nparams, search_bind_t *binds, int *bind_idx,
-                              char **like_pattern_out) {
+                              search_like_pool_t *pool) {
     char bind_buf[CBM_SZ_64];
 
     if (params->project) {
@@ -2208,18 +2310,23 @@ static int search_where_basic(const cbm_search_params_t *params, char *where, in
         where_bind_text(binds, bind_idx, params->label);
     }
     if (params->name_pattern) {
+        where_add_like_hints("n.name", params->name_pattern, where, where_sz, wlen, nparams,
+                             binds, bind_idx, pool);
         where_add_regex(where, where_sz, wlen, nparams, binds, bind_idx, "n.name",
                         params->name_pattern, params->case_sensitive);
     }
     if (params->qn_pattern) {
+        where_add_like_hints("n.qualified_name", params->qn_pattern, where, where_sz, wlen,
+                             nparams, binds, bind_idx, pool);
         where_add_regex(where, where_sz, wlen, nparams, binds, bind_idx, "n.qualified_name",
                         params->qn_pattern, params->case_sensitive);
     }
     if (params->file_pattern) {
-        *like_pattern_out = cbm_glob_to_like(params->file_pattern);
+        char *lp = cbm_glob_to_like(params->file_pattern);
+        like_pool_add(pool, lp);
         snprintf(bind_buf, sizeof(bind_buf), "n.file_path LIKE ?%d", *bind_idx + SKIP_ONE);
         *wlen = where_append(where, where_sz, *wlen, nparams, bind_buf);
-        where_bind_text(binds, bind_idx, *like_pattern_out);
+        where_bind_text(binds, bind_idx, lp);
     }
     return *nparams;
 }
@@ -2254,12 +2361,11 @@ static void search_where_advanced(const cbm_search_params_t *params, char *where
 }
 
 static int search_build_where(const cbm_search_params_t *params, char *where, int where_sz,
-                              search_bind_t *binds, int *bind_idx, char **like_pattern_out) {
+                              search_bind_t *binds, int *bind_idx, search_like_pool_t *pool) {
     int wlen = 0;
     int nparams = 0;
-    *like_pattern_out = NULL;
 
-    search_where_basic(params, where, where_sz, &wlen, &nparams, binds, bind_idx, like_pattern_out);
+    search_where_basic(params, where, where_sz, &wlen, &nparams, binds, bind_idx, pool);
     search_where_advanced(params, where, where_sz, &wlen, &nparams, binds, bind_idx);
 
     return nparams;
@@ -2278,16 +2384,16 @@ int cbm_store_search(cbm_store_t *s, const cbm_search_params_t *params, cbm_sear
     const char *select_cols = "SELECT n.id, n.project, n.label, n.name, n.qualified_name, "
                               "n.file_path, n.start_line, n.end_line, n.properties, "
                               "(SELECT COUNT(*) FROM edges e WHERE e.target_id = n.id AND "
-                              "e.type = 'CALLS') AS in_deg, "
+                              "e.type IN ('CALLS', 'USAGE')) AS in_deg, "
                               "(SELECT COUNT(*) FROM edges e WHERE e.source_id = n.id AND "
-                              "e.type = 'CALLS') AS out_deg ";
+                              "e.type IN ('CALLS', 'USAGE')) AS out_deg ";
 
     char where[CBM_SZ_2K] = "";
     search_bind_t binds[ST_SEARCH_MAX_BINDS];
-    char *like_pattern = NULL;
+    search_like_pool_t like_pool = {0};
 
     int nparams =
-        search_build_where(params, where, (int)sizeof(where), binds, &bind_idx, &like_pattern);
+        search_build_where(params, where, (int)sizeof(where), binds, &bind_idx, &like_pool);
 
     /* Build full SQL */
     if (nparams > 0) {
@@ -2300,11 +2406,19 @@ int cbm_store_search(cbm_store_t *s, const cbm_search_params_t *params, cbm_sear
     bool has_degree_filter = (params->min_degree >= 0 || params->max_degree >= 0);
     search_apply_degree_filter(sql, sizeof(sql), params);
 
-    /* Count query (wrap the full query) */
-    snprintf(count_sql, sizeof(count_sql), "SELECT COUNT(*) FROM (%s)", sql);
+    /* Count query — stripped of per-row edge subqueries for the common (no-degree-filter)
+     * case, since we only need the row count, not in_deg/out_deg.  The degree-filter
+     * case must wrap the full query because the filter references those columns. */
+    if (has_degree_filter) {
+        snprintf(count_sql, sizeof(count_sql), "SELECT COUNT(*) FROM (%s)", sql);
+    } else if (nparams > 0) {
+        snprintf(count_sql, sizeof(count_sql), "SELECT COUNT(*) FROM nodes n WHERE %s", where);
+    } else {
+        snprintf(count_sql, sizeof(count_sql), "SELECT COUNT(*) FROM nodes n");
+    }
 
     /* Add ORDER BY + LIMIT */
-    int limit = params->limit > 0 ? params->limit : ST_HALF_SEC;
+    int limit = params->limit > 0 ? params->limit : CBM_DEFAULT_SEARCH_LIMIT;
     int offset = params->offset;
     const char *name_col = has_degree_filter ? "name" : "n.name";
     char order_limit[CBM_SZ_128];
@@ -2330,7 +2444,7 @@ int cbm_store_search(cbm_store_t *s, const cbm_search_params_t *params, cbm_sear
     rc = sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &main_stmt, NULL);
     if (rc != SQLITE_OK) {
         store_set_error_sqlite(s, "search prepare");
-        free(like_pattern);
+        like_pool_free(&like_pool);
         return CBM_STORE_ERR;
     }
 
@@ -2355,7 +2469,7 @@ int cbm_store_search(cbm_store_t *s, const cbm_search_params_t *params, cbm_sear
     }
 
     sqlite3_finalize(main_stmt);
-    free(like_pattern);
+    like_pool_free(&like_pool);
 
     out->results = results;
     out->count = n;
@@ -2368,14 +2482,14 @@ void cbm_store_search_free(cbm_search_output_t *out) {
     }
     for (int i = 0; i < out->count; i++) {
         cbm_search_result_t *r = &out->results[i];
-        free((void *)r->node.project);
-        free((void *)r->node.label);
-        free((void *)r->node.name);
-        free((void *)r->node.qualified_name);
-        free((void *)r->node.file_path);
-        free((void *)r->node.properties_json);
+        safe_str_free(&r->node.project);
+        safe_str_free(&r->node.label);
+        safe_str_free(&r->node.name);
+        safe_str_free(&r->node.qualified_name);
+        safe_str_free(&r->node.file_path);
+        safe_str_free(&r->node.properties_json);
         for (int j = 0; j < r->connected_count; j++) {
-            free((void *)r->connected_names[j]);
+            safe_str_free(&r->connected_names[j]);
         }
         free(r->connected_names);
     }
@@ -2570,30 +2684,30 @@ void cbm_store_traverse_free(cbm_traverse_result_t *out) {
         return;
     }
     /* Free root */
-    free((void *)out->root.project);
-    free((void *)out->root.label);
-    free((void *)out->root.name);
-    free((void *)out->root.qualified_name);
-    free((void *)out->root.file_path);
-    free((void *)out->root.properties_json);
+    safe_str_free(&out->root.project);
+    safe_str_free(&out->root.label);
+    safe_str_free(&out->root.name);
+    safe_str_free(&out->root.qualified_name);
+    safe_str_free(&out->root.file_path);
+    safe_str_free(&out->root.properties_json);
 
     /* Free visited */
     for (int i = 0; i < out->visited_count; i++) {
         cbm_node_hop_t *h = &out->visited[i];
-        free((void *)h->node.project);
-        free((void *)h->node.label);
-        free((void *)h->node.name);
-        free((void *)h->node.qualified_name);
-        free((void *)h->node.file_path);
-        free((void *)h->node.properties_json);
+        safe_str_free(&h->node.project);
+        safe_str_free(&h->node.label);
+        safe_str_free(&h->node.name);
+        safe_str_free(&h->node.qualified_name);
+        safe_str_free(&h->node.file_path);
+        safe_str_free(&h->node.properties_json);
     }
     free(out->visited);
 
     /* Free edges */
     for (int i = 0; i < out->edge_count; i++) {
-        free((void *)out->edges[i].from_name);
-        free((void *)out->edges[i].to_name);
-        free((void *)out->edges[i].type);
+        safe_str_free(&out->edges[i].from_name);
+        safe_str_free(&out->edges[i].to_name);
+        safe_str_free(&out->edges[i].type);
     }
     free(out->edges);
 
@@ -2737,16 +2851,35 @@ int cbm_store_get_schema(cbm_store_t *s, const char *project, cbm_schema_info_t 
         const char *sql = "SELECT label, COUNT(*) FROM nodes WHERE project = ?1 GROUP BY label "
                           "ORDER BY COUNT(*) DESC;";
         sqlite3_stmt *stmt = NULL;
-        sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL);
+        if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK || !stmt) {
+            if (stmt) {
+                sqlite3_finalize(stmt);
+            }
+            return CBM_NOT_FOUND;
+        }
         bind_text(stmt, SKIP_ONE, project);
 
         int cap = ST_INIT_CAP_8;
         int n = 0;
         cbm_label_count_t *arr = malloc(cap * sizeof(cbm_label_count_t));
+        if (!arr) {
+            sqlite3_finalize(stmt);
+            return CBM_NOT_FOUND;
+        }
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             if (n >= cap) {
-                cap *= ST_GROWTH;
-                arr = safe_realloc(arr, cap * sizeof(cbm_label_count_t));
+                int new_cap = cap * ST_GROWTH;
+                void *tmp = realloc(arr, new_cap * sizeof(cbm_label_count_t));
+                if (!tmp) {
+                    for (int i = 0; i < n; i++) {
+                        safe_str_free(&arr[i].label);
+                    }
+                    free(arr);
+                    sqlite3_finalize(stmt);
+                    return CBM_NOT_FOUND;
+                }
+                arr = tmp;
+                cap = new_cap;
             }
             arr[n].label = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
             arr[n].count = sqlite3_column_int(stmt, SKIP_ONE);
@@ -2783,16 +2916,38 @@ int cbm_store_get_schema(cbm_store_t *s, const char *project, cbm_schema_info_t 
         const char *sql = "SELECT type, COUNT(*) FROM edges WHERE project = ?1 GROUP BY type ORDER "
                           "BY COUNT(*) DESC;";
         sqlite3_stmt *stmt = NULL;
-        sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL);
+        if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK || !stmt) {
+            if (stmt) {
+                sqlite3_finalize(stmt);
+            }
+            cbm_store_schema_free(out);
+            return CBM_NOT_FOUND;
+        }
         bind_text(stmt, SKIP_ONE, project);
 
         int cap = ST_INIT_CAP_8;
         int n = 0;
         cbm_type_count_t *arr = malloc(cap * sizeof(cbm_type_count_t));
+        if (!arr) {
+            sqlite3_finalize(stmt);
+            cbm_store_schema_free(out);
+            return CBM_NOT_FOUND;
+        }
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             if (n >= cap) {
-                cap *= ST_GROWTH;
-                arr = safe_realloc(arr, cap * sizeof(cbm_type_count_t));
+                int new_cap = cap * ST_GROWTH;
+                void *tmp = realloc(arr, new_cap * sizeof(cbm_type_count_t));
+                if (!tmp) {
+                    for (int i = 0; i < n; i++) {
+                        safe_str_free(&arr[i].type);
+                    }
+                    free(arr);
+                    sqlite3_finalize(stmt);
+                    cbm_store_schema_free(out);
+                    return CBM_NOT_FOUND;
+                }
+                arr = tmp;
+                cap = new_cap;
             }
             arr[n].type = heap_strdup((const char *)sqlite3_column_text(stmt, 0));
             arr[n].count = sqlite3_column_int(stmt, SKIP_ONE);
@@ -2831,7 +2986,7 @@ void cbm_store_schema_free(cbm_schema_info_t *out) {
         return;
     }
     for (int i = 0; i < out->node_label_count; i++) {
-        free((void *)out->node_labels[i].label);
+        safe_str_free(&out->node_labels[i].label);
         for (int j = 0; j < out->node_labels[i].property_count; j++) {
             free(out->node_labels[i].properties[j]);
         }
@@ -2840,7 +2995,7 @@ void cbm_store_schema_free(cbm_schema_info_t *out) {
     free(out->node_labels);
 
     for (int i = 0; i < out->edge_type_count; i++) {
-        free((void *)out->edge_types[i].type);
+        safe_str_free(&out->edge_types[i].type);
         for (int j = 0; j < out->edge_types[i].property_count; j++) {
             free(out->edge_types[i].properties[j]);
         }
@@ -2849,22 +3004,22 @@ void cbm_store_schema_free(cbm_schema_info_t *out) {
     free(out->edge_types);
 
     for (int i = 0; i < out->rel_pattern_count; i++) {
-        free((void *)out->rel_patterns[i]);
+        safe_str_free(&out->rel_patterns[i]);
     }
     free(out->rel_patterns);
 
     for (int i = 0; i < out->sample_func_count; i++) {
-        free((void *)out->sample_func_names[i]);
+        safe_str_free(&out->sample_func_names[i]);
     }
     free(out->sample_func_names);
 
     for (int i = 0; i < out->sample_class_count; i++) {
-        free((void *)out->sample_class_names[i]);
+        safe_str_free(&out->sample_class_names[i]);
     }
     free(out->sample_class_names);
 
     for (int i = 0; i < out->sample_qn_count; i++) {
-        free((void *)out->sample_qns[i]);
+        safe_str_free(&out->sample_qns[i]);
     }
     free(out->sample_qns);
 
@@ -3151,17 +3306,17 @@ static int arch_routes(cbm_store_t *s, const char *project, cbm_architecture_inf
         char *val;
         val = extract_json_string_prop(props, "\"method\"", ST_METHOD_PROP_LEN);
         if (val) {
-            free((void *)arr[n].method);
+            safe_str_free(&arr[n].method);
             arr[n].method = val;
         }
         val = extract_json_string_prop(props, "\"path\"", ST_PATH_PROP_LEN);
         if (val) {
-            free((void *)arr[n].path);
+            safe_str_free(&arr[n].path);
             arr[n].path = val;
         }
         val = extract_json_string_prop(props, "\"handler\"", ST_HANDLER_PROP_LEN);
         if (val) {
-            free((void *)arr[n].handler);
+            safe_str_free(&arr[n].handler);
             arr[n].handler = val;
         }
         n++;
@@ -3517,7 +3672,12 @@ static bool pkg_in_list(const char *pkg, char **list, int count) {
 static int collect_pkg_names(cbm_store_t *s, const char *sql, const char *project, char **pkgs,
                              int max_pkgs) {
     sqlite3_stmt *stmt = NULL;
-    sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL);
+    if (sqlite3_prepare_v2(s->db, sql, CBM_NOT_FOUND, &stmt, NULL) != SQLITE_OK || !stmt) {
+        if (stmt) {
+            sqlite3_finalize(stmt);
+        }
+        return CBM_NOT_FOUND;
+    }
     bind_text(stmt, SKIP_ONE, project);
     int count = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && count < max_pkgs) {
@@ -3603,8 +3763,8 @@ static int arch_layers(cbm_store_t *s, const char *project, cbm_architecture_inf
 
     /* Cleanup */
     for (int i = 0; i < bcount; i++) {
-        free((void *)boundaries[i].from);
-        free((void *)boundaries[i].to);
+        safe_str_free(&boundaries[i].from);
+        safe_str_free(&boundaries[i].to);
     }
     free(boundaries);
     for (int i = 0; i < nrpkgs; i++) {
@@ -4216,66 +4376,66 @@ void cbm_store_architecture_free(cbm_architecture_info_t *out) {
         return;
     }
     for (int i = 0; i < out->language_count; i++) {
-        free((void *)out->languages[i].language);
+        safe_str_free(&out->languages[i].language);
     }
     free(out->languages);
     for (int i = 0; i < out->package_count; i++) {
-        free((void *)out->packages[i].name);
+        safe_str_free(&out->packages[i].name);
     }
     free(out->packages);
     for (int i = 0; i < out->entry_point_count; i++) {
-        free((void *)out->entry_points[i].name);
-        free((void *)out->entry_points[i].qualified_name);
-        free((void *)out->entry_points[i].file);
+        safe_str_free(&out->entry_points[i].name);
+        safe_str_free(&out->entry_points[i].qualified_name);
+        safe_str_free(&out->entry_points[i].file);
     }
     free(out->entry_points);
     for (int i = 0; i < out->route_count; i++) {
-        free((void *)out->routes[i].method);
-        free((void *)out->routes[i].path);
-        free((void *)out->routes[i].handler);
+        safe_str_free(&out->routes[i].method);
+        safe_str_free(&out->routes[i].path);
+        safe_str_free(&out->routes[i].handler);
     }
     free(out->routes);
     for (int i = 0; i < out->hotspot_count; i++) {
-        free((void *)out->hotspots[i].name);
-        free((void *)out->hotspots[i].qualified_name);
+        safe_str_free(&out->hotspots[i].name);
+        safe_str_free(&out->hotspots[i].qualified_name);
     }
     free(out->hotspots);
     for (int i = 0; i < out->boundary_count; i++) {
-        free((void *)out->boundaries[i].from);
-        free((void *)out->boundaries[i].to);
+        safe_str_free(&out->boundaries[i].from);
+        safe_str_free(&out->boundaries[i].to);
     }
     free(out->boundaries);
     for (int i = 0; i < out->service_count; i++) {
-        free((void *)out->services[i].from);
-        free((void *)out->services[i].to);
-        free((void *)out->services[i].type);
+        safe_str_free(&out->services[i].from);
+        safe_str_free(&out->services[i].to);
+        safe_str_free(&out->services[i].type);
     }
     free(out->services);
     for (int i = 0; i < out->layer_count; i++) {
-        free((void *)out->layers[i].name);
-        free((void *)out->layers[i].layer);
-        free((void *)out->layers[i].reason);
+        safe_str_free(&out->layers[i].name);
+        safe_str_free(&out->layers[i].layer);
+        safe_str_free(&out->layers[i].reason);
     }
     free(out->layers);
     for (int i = 0; i < out->cluster_count; i++) {
-        free((void *)out->clusters[i].label);
+        safe_str_free(&out->clusters[i].label);
         for (int j = 0; j < out->clusters[i].top_node_count; j++) {
-            free((void *)out->clusters[i].top_nodes[j]);
+            safe_str_free(&out->clusters[i].top_nodes[j]);
         }
         free(out->clusters[i].top_nodes);
         for (int j = 0; j < out->clusters[i].package_count; j++) {
-            free((void *)out->clusters[i].packages[j]);
+            safe_str_free(&out->clusters[i].packages[j]);
         }
         free(out->clusters[i].packages);
         for (int j = 0; j < out->clusters[i].edge_type_count; j++) {
-            free((void *)out->clusters[i].edge_types[j]);
+            safe_str_free(&out->clusters[i].edge_types[j]);
         }
         free(out->clusters[i].edge_types);
     }
     free(out->clusters);
     for (int i = 0; i < out->file_tree_count; i++) {
-        free((void *)out->file_tree[i].path);
-        free((void *)out->file_tree[i].type);
+        safe_str_free(&out->file_tree[i].path);
+        safe_str_free(&out->file_tree[i].type);
     }
     free(out->file_tree);
     memset(out, 0, sizeof(*out));
@@ -4661,10 +4821,10 @@ void cbm_store_adr_free(cbm_adr_t *adr) {
     if (!adr) {
         return;
     }
-    free((void *)adr->project);
-    free((void *)adr->content);
-    free((void *)adr->created_at);
-    free((void *)adr->updated_at);
+    safe_str_free(&adr->project);
+    safe_str_free(&adr->content);
+    safe_str_free(&adr->created_at);
+    safe_str_free(&adr->updated_at);
     memset(adr, 0, sizeof(*adr));
 }
 
@@ -4702,12 +4862,12 @@ int cbm_store_find_architecture_docs(cbm_store_t *s, const char *project, char *
 /* ── Memory management ──────────────────────────────────────────── */
 
 void cbm_node_free_fields(cbm_node_t *n) {
-    free((void *)n->project);
-    free((void *)n->label);
-    free((void *)n->name);
-    free((void *)n->qualified_name);
-    free((void *)n->file_path);
-    free((void *)n->properties_json);
+    safe_str_free(&n->project);
+    safe_str_free(&n->label);
+    safe_str_free(&n->name);
+    safe_str_free(&n->qualified_name);
+    safe_str_free(&n->file_path);
+    safe_str_free(&n->properties_json);
 }
 
 void cbm_store_free_nodes(cbm_node_t *nodes, int count) {
@@ -4725,17 +4885,17 @@ void cbm_store_free_edges(cbm_edge_t *edges, int count) {
         return;
     }
     for (int i = 0; i < count; i++) {
-        free((void *)edges[i].project);
-        free((void *)edges[i].type);
-        free((void *)edges[i].properties_json);
+        safe_str_free(&edges[i].project);
+        safe_str_free(&edges[i].type);
+        safe_str_free(&edges[i].properties_json);
     }
     free(edges);
 }
 
 void cbm_project_free_fields(cbm_project_t *p) {
-    free((void *)p->name);
-    free((void *)p->indexed_at);
-    free((void *)p->root_path);
+    safe_str_free(&p->name);
+    safe_str_free(&p->indexed_at);
+    safe_str_free(&p->root_path);
 }
 
 void cbm_store_free_projects(cbm_project_t *projects, int count) {
@@ -4753,9 +4913,9 @@ void cbm_store_free_file_hashes(cbm_file_hash_t *hashes, int count) {
         return;
     }
     for (int i = 0; i < count; i++) {
-        free((void *)hashes[i].project);
-        free((void *)hashes[i].rel_path);
-        free((void *)hashes[i].sha256);
+        safe_str_free(&hashes[i].project);
+        safe_str_free(&hashes[i].rel_path);
+        safe_str_free(&hashes[i].sha256);
     }
     free(hashes);
 }

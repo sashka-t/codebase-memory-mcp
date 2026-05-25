@@ -34,6 +34,7 @@ extern void suite_graph_buffer(void);
 extern void suite_registry(void);
 extern void suite_pipeline(void);
 extern void suite_fqn(void);
+extern void suite_path_alias(void);
 extern void suite_watcher(void);
 extern void suite_lz4(void);
 extern void suite_zstd(void);
@@ -41,8 +42,20 @@ extern void suite_artifact(void);
 extern void suite_sqlite_writer(void);
 extern void suite_go_lsp(void);
 extern void suite_c_lsp(void);
+extern void suite_php_lsp(void);
+extern void suite_cs_lsp(void);
+extern void suite_cs_lsp_bench(void);
+extern void suite_scope(void);
+extern void suite_type_rep(void);
+extern void suite_py_lsp(void);
+extern void suite_py_lsp_bench(void);
+extern void suite_py_lsp_stress(void);
+extern void suite_py_lsp_scale(void);
+extern void suite_ts_lsp(void);
 extern void suite_store_arch(void);
 extern void suite_store_bulk(void);
+extern void suite_store_pragmas(void);
+extern void suite_store_checkpoint(void);
 extern void suite_traces(void);
 extern void suite_configlink(void);
 extern void suite_infrascan(void);
@@ -57,6 +70,7 @@ extern void suite_yaml(void);
 extern void suite_integration(void);
 extern void suite_incremental(void);
 extern void suite_simhash(void);
+extern void suite_stack_overflow(void);
 
 int main(void) {
     printf("\n  codebase-memory-mcp  C test suite\n");
@@ -79,6 +93,8 @@ int main(void) {
     RUN_SUITE(store_edges);
     RUN_SUITE(store_search);
     RUN_SUITE(store_bulk);
+    RUN_SUITE(store_pragmas);
+    RUN_SUITE(store_checkpoint);
 
     /* Cypher (M6) */
     RUN_SUITE(cypher);
@@ -99,6 +115,7 @@ int main(void) {
     RUN_SUITE(registry);
     RUN_SUITE(pipeline);
     RUN_SUITE(fqn);
+    RUN_SUITE(path_alias);
 
     /* Watcher (M10) */
     RUN_SUITE(watcher);
@@ -112,8 +129,18 @@ int main(void) {
     RUN_SUITE(artifact);
 
     /* LSP resolvers */
+    RUN_SUITE(scope);
+    RUN_SUITE(type_rep);
     RUN_SUITE(go_lsp);
     RUN_SUITE(c_lsp);
+    RUN_SUITE(php_lsp);
+    RUN_SUITE(cs_lsp);
+    RUN_SUITE(cs_lsp_bench);
+    RUN_SUITE(py_lsp);
+    RUN_SUITE(py_lsp_bench);
+    RUN_SUITE(py_lsp_stress);
+    RUN_SUITE(py_lsp_scale);
+    RUN_SUITE(ts_lsp);
 
     /* Architecture + ADR + Louvain */
     RUN_SUITE(store_arch);
@@ -153,6 +180,9 @@ int main(void) {
 
     /* SimHash / SIMILAR_TO */
     RUN_SUITE(simhash);
+
+    /* Stack overflow regression (GitHub #199) */
+    RUN_SUITE(stack_overflow);
 
     /* Integration (end-to-end) */
     RUN_SUITE(integration);
