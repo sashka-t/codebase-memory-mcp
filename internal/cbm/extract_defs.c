@@ -687,13 +687,17 @@ TSNode cbm_resolve_func_name(TSNode node, CBMLanguage lang) {
             return name;
         }
 
-        /* Swift and newer tree-sitter-kotlin: function_declaration has no `name`
-         * field; the function name is a `simple_identifier` child. */
+        /* Swift and tree-sitter-kotlin variants may omit the `name` field; the
+         * function name is a simple_identifier or plain identifier child. */
         if ((lang == CBM_LANG_SWIFT || lang == CBM_LANG_KOTLIN) &&
             strcmp(kind, "function_declaration") == 0) {
             TSNode si = cbm_find_child_by_kind(node, "simple_identifier");
             if (!ts_node_is_null(si)) {
                 return si;
+            }
+            TSNode id = cbm_find_child_by_kind(node, "identifier");
+            if (!ts_node_is_null(id)) {
+                return id;
             }
         }
 
@@ -2206,30 +2210,44 @@ static const char **extract_php_bases(CBMArena *a, TSNode node, const char *sour
 
 /* Kotlin: supertypes live in `delegation_specifier` children.  Each holds
  * either a bare `user_type` (interface) or a `constructor_invocation` whose
- * `user_type` is the superclass.  Descend to the `type_identifier`. */
+ * `user_type` is the superclass.  Descend to the type/name node. */
+static void collect_kotlin_base_from_specifier(CBMArena *a, TSNode spec, const char *source,
+                                               const char **bases, int *count) {
+    if (*count >= MAX_BASES_MINUS_1) {
+        return;
+    }
+    TSNode ut = ts_node_named_child(spec, 0);
+    if (!ts_node_is_null(ut) && strcmp(ts_node_type(ut), "constructor_invocation") == 0) {
+        ut = ts_node_named_child(ut, 0);
+    }
+    if (ts_node_is_null(ut)) {
+        return;
+    }
+    TSNode base = ut;
+    if (strcmp(ts_node_type(ut), "user_type") == 0 && ts_node_named_child_count(ut) > 0) {
+        base = ts_node_named_child(ut, 0);
+    }
+    push_base_text(a, base, source, bases, MAX_BASES_MINUS_1, count);
+}
+
 static const char **extract_kotlin_bases(CBMArena *a, TSNode node, const char *source) {
     const char *bases[MAX_BASES];
     int count = 0;
     uint32_t nc = ts_node_child_count(node);
     for (uint32_t i = 0; i < nc && count < MAX_BASES_MINUS_1; i++) {
         TSNode child = ts_node_child(node, i);
-        if (strcmp(ts_node_type(child), "delegation_specifier") != 0) {
-            continue;
+        const char *kind = ts_node_type(child);
+        if (strcmp(kind, "delegation_specifier") == 0) {
+            collect_kotlin_base_from_specifier(a, child, source, bases, &count);
+        } else if (strcmp(kind, "delegation_specifiers") == 0) {
+            uint32_t dc = ts_node_child_count(child);
+            for (uint32_t j = 0; j < dc && count < MAX_BASES_MINUS_1; j++) {
+                TSNode spec = ts_node_child(child, j);
+                if (strcmp(ts_node_type(spec), "delegation_specifier") == 0) {
+                    collect_kotlin_base_from_specifier(a, spec, source, bases, &count);
+                }
+            }
         }
-        /* Find the user_type (directly or under a constructor_invocation). */
-        TSNode ut = ts_node_named_child(child, 0);
-        if (!ts_node_is_null(ut) && strcmp(ts_node_type(ut), "constructor_invocation") == 0) {
-            ut = ts_node_named_child(ut, 0);
-        }
-        if (ts_node_is_null(ut)) {
-            continue;
-        }
-        /* user_type → type_identifier (first child); strip generic args. */
-        TSNode ti = ut;
-        if (strcmp(ts_node_type(ut), "user_type") == 0 && ts_node_named_child_count(ut) > 0) {
-            ti = ts_node_named_child(ut, 0);
-        }
-        push_base_text(a, ti, source, bases, MAX_BASES_MINUS_1, &count);
     }
     if (count == 0) {
         return NULL;
@@ -3506,11 +3524,14 @@ static void extract_class_def(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec
     if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_OBJC) {
         name_node = cbm_find_child_by_kind(node, "identifier");
     }
-    // Swift and newer tree-sitter-kotlin: class/object name is a type_identifier
-    // child (no "name" field).
+    // Swift and tree-sitter-kotlin variants may put class/object names in
+    // type_identifier or plain identifier children (no "name" field).
     if (ts_node_is_null(name_node) &&
         (ctx->language == CBM_LANG_SWIFT || ctx->language == CBM_LANG_KOTLIN)) {
         name_node = cbm_find_child_by_kind(node, "type_identifier");
+        if (ts_node_is_null(name_node)) {
+            name_node = cbm_find_child_by_kind(node, "identifier");
+        }
     }
     // Protobuf: service_name / message_name / enum_name children
     if (ts_node_is_null(name_node) && ctx->language == CBM_LANG_PROTOBUF) {
@@ -4068,7 +4089,11 @@ static TSNode resolve_method_name(TSNode child, CBMLanguage lang) {
 
     if ((lang == CBM_LANG_SWIFT || lang == CBM_LANG_KOTLIN) &&
         strcmp(ck, "function_declaration") == 0) {
-        return cbm_find_child_by_kind(child, "simple_identifier");
+        TSNode name = cbm_find_child_by_kind(child, "simple_identifier");
+        if (!ts_node_is_null(name)) {
+            return name;
+        }
+        return cbm_find_child_by_kind(child, "identifier");
     }
 
     // Squirrel: function_declaration's name is a plain `identifier` child.
@@ -6126,6 +6151,197 @@ static void extract_lisp_def(CBMExtractCtx *ctx, TSNode node) {
     cbm_defs_push(&ctx->result->defs, a, def);
 }
 
+static bool kotlin_recovery_def_exists(CBMExtractCtx *ctx, const char *name) {
+    if (!name) {
+        return true;
+    }
+    for (int i = 0; i < ctx->result->defs.count; i++) {
+        CBMDefinition *d = &ctx->result->defs.items[i];
+        if (d->name && strcmp(d->name, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *kotlin_skip_ws(const char *p, const char *end) {
+    while (p < end && isspace((unsigned char)*p)) {
+        p++;
+    }
+    return p;
+}
+
+static bool kotlin_is_ident_start(char c) {
+    return isalpha((unsigned char)c) || c == '_';
+}
+
+static bool kotlin_is_ident_part(char c) {
+    return isalnum((unsigned char)c) || c == '_';
+}
+
+static bool kotlin_word_at(const char *p, const char *end, const char *word) {
+    size_t len = strlen(word);
+    if ((size_t)(end - p) < len || strncmp(p, word, len) != 0) {
+        return false;
+    }
+    bool before_ok = true;
+    bool after_ok = (p + len >= end) || !kotlin_is_ident_part(p[len]);
+    return before_ok && after_ok;
+}
+
+static char *kotlin_clean_base(CBMArena *a, const char *start, const char *end) {
+    start = kotlin_skip_ws(start, end);
+    while (end > start && isspace((unsigned char)end[-1])) {
+        end--;
+    }
+    const char *p = start;
+    while (p < end && (kotlin_is_ident_part(*p) || *p == '.')) {
+        p++;
+    }
+    if (p == start) {
+        return NULL;
+    }
+    return cbm_arena_strndup(a, start, (size_t)(p - start));
+}
+
+static const char **kotlin_bases_from_text(CBMArena *a, const char *start, const char *end) {
+    const char *bases[MAX_BASES];
+    int count = 0;
+    int angle = 0;
+    int paren = 0;
+    const char *colon = NULL;
+    for (const char *p = start; p < end; p++) {
+        if (*p == '<') {
+            angle++;
+        } else if (*p == '>' && angle > 0) {
+            angle--;
+        } else if (*p == '(') {
+            paren++;
+        } else if (*p == ')' && paren > 0) {
+            paren--;
+        } else if (*p == '{' && angle == 0 && paren == 0) {
+            break;
+        } else if (*p == ':' && angle == 0 && paren == 0) {
+            colon = p;
+            break;
+        }
+    }
+    if (!colon) {
+        return NULL;
+    }
+
+    const char *seg = colon + SKIP_ONE;
+    angle = 0;
+    paren = 0;
+    for (const char *p = seg; p <= end && count < MAX_BASES_MINUS_1; p++) {
+        char ch = (p < end) ? *p : '\0';
+        if (ch == '<') {
+            angle++;
+        } else if (ch == '>' && angle > 0) {
+            angle--;
+        } else if (ch == '(') {
+            paren++;
+        } else if (ch == ')' && paren > 0) {
+            paren--;
+        }
+        if ((ch == ',' || ch == '{' || ch == '\n' || ch == '\0') && angle == 0 && paren == 0) {
+            char *base = kotlin_clean_base(a, seg, p);
+            if (base && base[0]) {
+                bases[count++] = base;
+            }
+            seg = p + SKIP_ONE;
+            if (ch == '{' || ch == '\n' || ch == '\0') {
+                break;
+            }
+        }
+    }
+    if (count == 0) {
+        return NULL;
+    }
+    const char **result =
+        (const char **)cbm_arena_alloc(a, (size_t)(count + NULL_TERM) * sizeof(const char *));
+    if (!result) {
+        return NULL;
+    }
+    for (int i = 0; i < count; i++) {
+        result[i] = bases[i];
+    }
+    result[count] = NULL;
+    return result;
+}
+
+static void emit_kotlin_recovered_def(CBMExtractCtx *ctx, const char *name, const char *label,
+                                      const char **bases, TSNode err_node) {
+    if (!name || !name[0] || kotlin_recovery_def_exists(ctx, name)) {
+        return;
+    }
+    CBMArena *a = ctx->arena;
+    const char *class_qn = ctx->enclosing_class_qn
+                               ? cbm_arena_sprintf(a, "%s.%s", ctx->enclosing_class_qn, name)
+                               : cbm_fqn_compute(a, ctx->project, ctx->rel_path, name);
+
+    CBMDefinition def;
+    memset(&def, 0, sizeof(def));
+    def.name = name;
+    def.qualified_name = class_qn;
+    def.label = label;
+    def.file_path = ctx->rel_path;
+    def.start_line = ts_node_start_point(err_node).row + TS_LINE_OFFSET;
+    def.end_line = ts_node_end_point(err_node).row + TS_LINE_OFFSET;
+    def.lines = (int)(def.end_line - def.start_line + TS_LINE_OFFSET);
+    def.is_exported = cbm_is_exported(name, ctx->language);
+    def.base_classes = bases;
+    cbm_defs_push(&ctx->result->defs, a, def);
+}
+
+static void recover_kotlin_error_classes_from_text(CBMExtractCtx *ctx, TSNode err_node) {
+    CBMArena *a = ctx->arena;
+    uint32_t start_byte = ts_node_start_byte(err_node);
+    uint32_t end_byte = ts_node_end_byte(err_node);
+    const char *text = ctx->source + start_byte;
+    const char *end = ctx->source + end_byte;
+
+    for (const char *p = text; p < end; p++) {
+        if (!kotlin_is_ident_start(*p)) {
+            continue;
+        }
+        const char *label = NULL;
+        const char *name_start = NULL;
+        if (kotlin_word_at(p, end, "interface")) {
+            label = "Interface";
+            name_start = kotlin_skip_ws(p + strlen("interface"), end);
+        } else if (kotlin_word_at(p, end, "object")) {
+            label = "Class";
+            name_start = kotlin_skip_ws(p + strlen("object"), end);
+        } else if (kotlin_word_at(p, end, "class")) {
+            label = "Class";
+            name_start = kotlin_skip_ws(p + strlen("class"), end);
+        } else if (kotlin_word_at(p, end, "typealias")) {
+            label = "Class";
+            name_start = kotlin_skip_ws(p + strlen("typealias"), end);
+        } else {
+            continue;
+        }
+        if (!name_start || name_start >= end || !kotlin_is_ident_start(*name_start)) {
+            continue; /* anonymous companion object */
+        }
+        const char *name_end = name_start + SKIP_ONE;
+        while (name_end < end && kotlin_is_ident_part(*name_end)) {
+            name_end++;
+        }
+        char *name = cbm_arena_strndup(a, name_start, (size_t)(name_end - name_start));
+        const char *bases_end = name_end;
+        while (bases_end < end && *bases_end != '\n') {
+            if (*bases_end == '{') {
+                break;
+            }
+            bases_end++;
+        }
+        const char **bases = kotlin_bases_from_text(a, name_end, bases_end);
+        emit_kotlin_recovered_def(ctx, name, label, bases, err_node);
+    }
+}
+
 /* Kotlin ERROR-node class recovery.
  *
  * The vendored fwcd tree-sitter-kotlin (commit 93bfeee) fails to parse two
@@ -6148,6 +6364,8 @@ static void extract_lisp_def(CBMExtractCtx *ctx, TSNode node) {
  * (e.g. a `companion object` with no name) are skipped — there is nothing to emit.
  */
 static void recover_kotlin_error_classes(CBMExtractCtx *ctx, TSNode err_node) {
+    recover_kotlin_error_classes_from_text(ctx, err_node);
+
     CBMArena *a = ctx->arena;
     uint32_t cc = ts_node_child_count(err_node);
     for (uint32_t i = 0; i < cc; i++) {

@@ -59,6 +59,8 @@ enum {
 #include "foundation/dump_verify.h"
 #include "foundation/compat_regex.h"
 #include "pipeline/artifact.h"
+#include "raw_artifact/raw_artifact.h"
+#include "test_ingest/test_session.h"
 
 #ifdef _WIN32
 #include <direct.h>
@@ -253,7 +255,7 @@ char *cbm_mcp_text_result(const char *text, bool is_error) {
     yyjson_mut_val *content = yyjson_mut_arr(doc);
     yyjson_mut_val *item = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_str(doc, item, "type", "text");
-    yyjson_mut_obj_add_str(doc, item, "text", text ? text : "");
+    yyjson_mut_obj_add_strcpy(doc, item, "text", text ? text : "");
     yyjson_mut_arr_add_val(content, item);
     yyjson_mut_obj_add_val(doc, root, "content", content);
 
@@ -382,8 +384,10 @@ static const tool_def_t TOOLS[] = {
      "'total' (full match count) and 'has_more' (true if truncated) so callers can "
      "detect the limit and paginate.\"},\"offset\":{\"type\":\"integer\",\"default\":0,"
      "\"description\":\"Skip the first N matching nodes. Combine with 'limit' to page: "
-     "increment offset by limit and re-call while has_more is true.\"}},"
-     "\"required\":[\"project\"]}"},
+     "increment offset by limit and re-call while has_more is true.\"},"
+     "\"repo_path\":{\"type\":\"string\",\"description\":\"Alternative to project: absolute "
+     "repository path; project slug is derived automatically.\"}},"
+     "\"required\":[]}"},
 
     {"query_graph", "Query graph",
      "Execute a Cypher query against the knowledge graph for complex multi-hop patterns, "
@@ -416,8 +420,10 @@ static const tool_def_t TOOLS[] = {
      "\"max_rows\":{\"type\":\"integer\","
      "\"description\":"
      "\"Optional row limit. Default: unlimited up to a 100k row "
-     "ceiling. No offset support — use search_graph for paginated browsing.\"}},"
-     "\"required\":[\"query\",\"project\"]}"},
+     "ceiling. No offset support — use search_graph for paginated browsing.\"},"
+     "\"repo_path\":{\"type\":\"string\",\"description\":\"Alternative to project: absolute "
+     "repository path; project slug is derived automatically.\"}},"
+     "\"required\":[\"query\"]}"},
 
     {"trace_path", "Trace path",
      "Trace paths through the code graph. Modes: calls (callers/callees), data_flow (value "
@@ -438,7 +444,9 @@ static const tool_def_t TOOLS[] = {
      "\"},\"include_tests\":{\"type\":\"boolean\",\"default\":false,"
      "\"description\":\"Include test files in results. When false (default), test files are "
      "filtered out. When true, test nodes are included with is_test=true marker."
-     "\"}},\"required\":[\"function_name\",\"project\"]}"},
+     "\"},\"repo_path\":{\"type\":\"string\",\"description\":\"Alternative to project: absolute "
+     "repository path; project slug is derived automatically.\"}},"
+     "\"required\":[\"function_name\"]}"},
 
     {"get_code_snippet", "Get code snippet",
      "Read source code for a function/class/symbol. IMPORTANT: First call search_graph to find the "
@@ -449,8 +457,10 @@ static const tool_def_t TOOLS[] = {
      "there and treat the returned source as ground truth.",
      "{\"type\":\"object\",\"properties\":{\"qualified_name\":{\"type\":\"string\",\"description\":"
      "\"Full qualified_name from search_graph, or short function name\"},\"project\":{"
-     "\"type\":\"string\"},\"include_neighbors\":{"
-     "\"type\":\"boolean\",\"default\":false}},\"required\":[\"qualified_name\",\"project\"]}"},
+     "\"type\":\"string\"},\"repo_path\":{\"type\":\"string\",\"description\":\"Alternative to "
+     "project: absolute repository path; project slug is derived automatically.\"},"
+     "\"include_neighbors\":{"
+     "\"type\":\"boolean\",\"default\":false}},\"required\":[\"qualified_name\"]}"},
 
     {"get_graph_schema", "Get graph schema",
      "Get the schema of the knowledge graph (node labels, edge types)",
@@ -496,7 +506,9 @@ static const tool_def_t TOOLS[] = {
      "\"description\":\"Max enriched results per call. Default 10. Response includes "
      "'total_grep_matches' and 'total_results' so callers can detect truncation. No "
      "offset parameter — raise limit or narrow with file_pattern / path_filter to see more."
-     "\",\"default\":10}},\"required\":[\"pattern\",\"project\"]}"},
+     "\",\"default\":10},\"repo_path\":{\"type\":\"string\",\"description\":\"Alternative to "
+     "project: absolute repository path; project slug is derived automatically.\"}},"
+     "\"required\":[\"pattern\"]}"},
 
     {"list_projects", "List projects", "List all indexed projects",
      "{\"type\":\"object\",\"properties\":{}}"},
@@ -538,6 +550,100 @@ static const tool_def_t TOOLS[] = {
      "\"object\",\"properties\":{\"caller\":{\"type\":\"string\"},\"callee\":{\"type\":\"string\"},"
      "\"count\":{\"type\":\"integer\"}},\"additionalProperties\":false}},\"project\":{\"type\":"
      "\"string\"}},\"required\":[\"traces\",\"project\"]}"},
+
+    {"run_tests",
+     "Run a whitelisted test command (gradle, ./gradlew, mvn, go test, pytest, sbt), parse "
+     "results into a knowledge graph, and return a summary. Set run_id or persist=true to keep "
+     "results for follow-up queries.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"command\":{\"type\":\"string\",\"description\":\"Full test command. Must begin with: "
+     "gradle, ./gradlew, mvn, go test, pytest, or sbt. Prefer tests[] for Gradle --tests filters.\"},"
+     "\"tests\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Gradle/Maven test patterns; appended as --tests <pattern> (shell-safe quoting).\"},"
+     "\"cwd\":{\"type\":\"string\",\"description\":\"Working directory. Must pass cbm_validate_shell_arg.\"},"
+     "\"project\":{\"type\":\"string\",\"description\":\"Project name for TESTS edge cross-reference. Optional.\"},"
+     "\"run_id\":{\"type\":\"string\"},"
+     "\"persist\":{\"type\":\"boolean\",\"description\":\"If true and run_id is omitted, server generates a timestamp-based run_id. Default false.\"},"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"auto\",\"junit_xml\",\"go_test\",\"pytest\",\"sbt\"]},"
+     "\"timeout_seconds\":{\"type\":\"integer\",\"description\":\"Kill runner after N seconds. Default 600.\"}"
+     "},\"required\":[\"command\",\"cwd\"]}"},
+
+    {"ingest_test_reports",
+     "Parse existing JUnit XML test reports from disk (Gradle/Maven/sbt/IntelliJ). Auto-scans "
+     "standard directories under cwd (including Gradle submodules) unless report_dir is set.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"cwd\":{\"type\":\"string\"},"
+     "\"project\":{\"type\":\"string\"},"
+     "\"run_id\":{\"type\":\"string\"},"
+     "\"persist\":{\"type\":\"boolean\"},"
+     "\"report_dir\":{\"type\":\"string\",\"description\":\"Override auto-scan. Parses all *.xml files under this directory.\"},"
+     "\"format\":{\"type\":\"string\",\"enum\":[\"auto\",\"junit_xml\",\"go_test\",\"pytest\",\"sbt\"]}"
+     "},\"required\":[\"cwd\"]}"},
+
+    {"query_test_results",
+     "Query a persisted test run. Returns matching test cases filtered by status, name, and/or "
+     "suite regex.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"run_id\":{\"type\":\"string\",\"description\":\"Run id, or the literal latest with latest=true.\"},"
+     "\"latest\":{\"type\":\"boolean\",\"description\":\"When true, use the newest persisted run (optionally filtered by project).\"},"
+     "\"project\":{\"type\":\"string\",\"description\":\"Project filter when latest=true.\"},"
+     "\"status\":{\"type\":\"string\",\"enum\":[\"passed\",\"failed\",\"skipped\",\"error\"]},"
+     "\"name_pattern\":{\"type\":\"string\"},"
+     "\"suite_pattern\":{\"type\":\"string\"},"
+     "\"limit\":{\"type\":\"integer\"},"
+     "\"offset\":{\"type\":\"integer\"}"
+     "},\"required\":[]}"},
+
+    {"list_test_runs",
+     "List persistent test runs held in the server session, optionally filtered by project.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"project\":{\"type\":\"string\"}"
+     "}}"},
+
+    {"trace_test_failures",
+     "For each failed/errored test in a run, resolve related production functions via TESTS edges "
+     "and return inbound CALLS callers up to depth.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"run_id\":{\"type\":\"string\"},"
+     "\"project\":{\"type\":\"string\"},"
+     "\"depth\":{\"type\":\"integer\",\"description\":\"Caller BFS depth. Default 2.\"},"
+     "\"include_errors\":{\"type\":\"boolean\",\"description\":\"Include status=error. Default true.\"}"
+     "},\"required\":[\"run_id\",\"project\"]}"},
+
+    {"ingest_raw_artifact",
+     "Store large shell/build/test logs for bounded retrieval. Prefer over pasting logs into "
+     "context. Works from MCP and CLI; persisted in ~/.cache/codebase-memory-mcp/_artifacts.db. "
+     "Then list_raw_artifacts / search_raw_artifacts / get_raw_artifact.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"project\":{\"type\":\"string\"},\"repo_path\":{\"type\":\"string\"},"
+     "\"content\":{\"type\":\"string\"},\"content_base64\":{\"type\":\"string\"},"
+     "\"source\":{\"type\":\"string\"},\"format\":{\"type\":\"string\"},"
+     "\"mime_type\":{\"type\":\"string\"},\"run_id\":{\"type\":\"string\"},"
+     "\"tags\":{\"type\":\"object\"},\"parse\":{\"type\":\"boolean\"}"
+     "},\"required\":[]}"},
+
+    {"list_raw_artifacts",
+     "List stored raw artifacts for a project (metadata only, no full content).",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"project\":{\"type\":\"string\"},\"repo_path\":{\"type\":\"string\"},"
+     "\"limit\":{\"type\":\"integer\"},\"offset\":{\"type\":\"integer\"}"
+     "},\"required\":[]}"},
+
+    {"get_raw_artifact",
+     "Read a bounded slice of a stored raw artifact by artifact_id or sha256.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"project\":{\"type\":\"string\"},\"repo_path\":{\"type\":\"string\"},"
+     "\"artifact_id\":{\"type\":\"integer\"},\"sha256\":{\"type\":\"string\"},"
+     "\"offset\":{\"type\":\"integer\",\"default\":0},"
+     "\"max_bytes\":{\"type\":\"integer\",\"default\":4096}"
+     "},\"required\":[]}"},
+
+    {"search_raw_artifacts",
+     "Search within stored raw artifacts. pattern is required (substring match).",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"project\":{\"type\":\"string\"},\"repo_path\":{\"type\":\"string\"},"
+     "\"pattern\":{\"type\":\"string\"},\"artifact_id\":{\"type\":\"integer\"},"
+     "\"limit\":{\"type\":\"integer\"},\"offset\":{\"type\":\"integer\"}"
+     "},\"required\":[\"pattern\"]}"},
 };
 
 static const int TOOL_COUNT = sizeof(TOOLS) / sizeof(TOOLS[0]);
@@ -895,7 +1001,55 @@ struct cbm_mcp_server {
     cbm_pipeline_t *active_pipeline; /* non-NULL while index_repository runs */
     int64_t active_request_id;       /* JSON-RPC id of the in-progress tool call */
     char *active_request_id_str;     /* string JSON-RPC id of the in-progress tool call */
+
+    CBMHashTable *test_sessions; /* run_id -> cbm_test_session_t* */
+    cbm_raw_store_t *raw_store;  /* persistent shell/log artifacts */
 };
+
+typedef struct {
+    const char **keys;
+    size_t count;
+    size_t cap;
+} mcp_ts_keys_t;
+
+static void mcp_collect_ts_keys(const char *key, void *value, void *userdata) {
+    mcp_ts_keys_t *c = userdata;
+    (void)value;
+    if (c->count == c->cap) {
+        size_t ncap = c->cap ? c->cap * (size_t)CBM_SZ_2 : (size_t)CBM_SZ_16;
+        void *p = realloc(c->keys, ncap * sizeof(*c->keys));
+        if (!p) {
+            return;
+        }
+        c->keys = p;
+        c->cap = ncap;
+    }
+    c->keys[c->count++] = key;
+}
+
+static void mcp_free_all_test_sessions(CBMHashTable *ht) {
+    if (!ht) {
+        return;
+    }
+    mcp_ts_keys_t c = {0};
+    cbm_ht_foreach(ht, mcp_collect_ts_keys, &c);
+    for (size_t i = 0; i < c.count; i++) {
+        void *removed = cbm_ht_delete(ht, c.keys[i]);
+        cbm_test_session_free(removed);
+    }
+    free(c.keys);
+    cbm_ht_free(ht);
+}
+
+#ifdef __GNUC__
+__attribute__((unused))
+#endif
+static void test_sessions_evict(cbm_mcp_server_t *srv) {
+    if (!srv || !srv->test_sessions) {
+        return;
+    }
+    cbm_test_sessions_evict_expired(srv->test_sessions, time(NULL));
+}
 
 cbm_mcp_server_t *cbm_mcp_server_new(const char *store_path) {
     cbm_mcp_server_t *srv = calloc(CBM_ALLOC_ONE, sizeof(*srv));
@@ -912,6 +1066,18 @@ cbm_mcp_server_t *cbm_mcp_server_new(const char *store_path) {
         srv->store = cbm_store_open_memory();
     }
     srv->owns_store = true;
+
+    srv->test_sessions = cbm_ht_create((uint32_t)CBM_SZ_16);
+    if (!srv->test_sessions) {
+        if (srv->owns_store && srv->store) {
+            cbm_store_close(srv->store);
+        }
+        free(srv->current_project);
+        free(srv);
+        return NULL;
+    }
+
+    srv->raw_store = cbm_raw_store_open_default();
 
     return srv;
 }
@@ -950,6 +1116,10 @@ void cbm_mcp_server_free(cbm_mcp_server_t *srv) {
     if (srv->autoindex_active) {
         cbm_thread_join(&srv->autoindex_tid);
     }
+    mcp_free_all_test_sessions(srv->test_sessions);
+    srv->test_sessions = NULL;
+    cbm_raw_store_close(srv->raw_store);
+    srv->raw_store = NULL;
     if (srv->owns_store && srv->store) {
         cbm_store_close(srv->store);
     }
@@ -1283,6 +1453,8 @@ static bool project_has_adr(cbm_store_t *store, const char *project, const char 
 
 /* ── Tool handler implementations ─────────────────────────────── */
 
+static char *mcp_resolve_project_arg(const char *args);
+
 /* Return true if filename is a valid project .db file (not temp/internal).
  *
  * Project names derived from /tmp/... source roots legitimately begin with
@@ -1397,6 +1569,7 @@ static void build_project_json_entry(yyjson_mut_doc *doc, yyjson_mut_val *arr, c
     add_git_context_json(doc, p, root_path_buf[0] ? root_path_buf : NULL);
     yyjson_mut_obj_add_int(doc, p, "nodes", nodes);
     yyjson_mut_obj_add_int(doc, p, "edges", edges);
+    yyjson_mut_obj_add_str(doc, p, "status", nodes > 0 ? "ready" : "empty");
     yyjson_mut_obj_add_int(doc, p, "size_bytes", size_bytes);
     yyjson_mut_arr_add_val(arr, p);
 }
@@ -6058,6 +6231,31 @@ static char *handle_ingest_traces(cbm_mcp_server_t *srv, const char *args) {
 
 /* ── Tool dispatch ────────────────────────────────────────────── */
 
+/* Resolve project slug from JSON args: `project` or `repo_path`. */
+static char *mcp_resolve_project_arg(const char *args) {
+    char *project = cbm_mcp_get_string_arg(args, "project");
+    if (project && project[0]) {
+        return project;
+    }
+    free(project);
+    char *repo_path = cbm_mcp_get_string_arg(args, "repo_path");
+    if (!repo_path || !repo_path[0]) {
+        free(repo_path);
+        return NULL;
+    }
+    char *norm = strdup(repo_path);
+    free(repo_path);
+    if (norm) {
+        cbm_normalize_path_sep(norm);
+    }
+    char *derived = cbm_project_name_from_path(norm ? norm : "");
+    free(norm);
+    return derived;
+}
+
+#include "mcp/mcp_test_tools.inc"
+#include "mcp/mcp_raw_tools.inc"
+
 char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const char *args_json) {
     if (!tool_name) {
         return cbm_mcp_text_result("missing tool name", true);
@@ -6106,6 +6304,33 @@ char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const ch
     }
     if (strcmp(tool_name, "ingest_traces") == 0) {
         return handle_ingest_traces(srv, args_json);
+    }
+    if (strcmp(tool_name, "run_tests") == 0) {
+        return handle_run_tests(srv, args_json);
+    }
+    if (strcmp(tool_name, "ingest_test_reports") == 0) {
+        return handle_ingest_test_reports(srv, args_json);
+    }
+    if (strcmp(tool_name, "query_test_results") == 0) {
+        return handle_query_test_results(srv, args_json);
+    }
+    if (strcmp(tool_name, "list_test_runs") == 0) {
+        return handle_list_test_runs(srv, args_json);
+    }
+    if (strcmp(tool_name, "trace_test_failures") == 0) {
+        return handle_trace_test_failures(srv, args_json);
+    }
+    if (strcmp(tool_name, "ingest_raw_artifact") == 0) {
+        return handle_ingest_raw_artifact(srv, args_json);
+    }
+    if (strcmp(tool_name, "list_raw_artifacts") == 0) {
+        return handle_list_raw_artifacts(srv, args_json);
+    }
+    if (strcmp(tool_name, "get_raw_artifact") == 0) {
+        return handle_get_raw_artifact(srv, args_json);
+    }
+    if (strcmp(tool_name, "search_raw_artifacts") == 0) {
+        return handle_search_raw_artifacts(srv, args_json);
     }
     char msg[CBM_SZ_256];
     snprintf(msg, sizeof(msg), "unknown tool: %s", tool_name);

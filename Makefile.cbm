@@ -115,6 +115,8 @@ FOUNDATION_SRCS = \
     src/foundation/subprocess.c \
     src/foundation/sha256.c
 
+RAW_ARTIFACT_SRCS = src/raw_artifact/raw_artifact.c
+
 # Existing extraction C code (compiled from current location)
 EXTRACTION_SRCS = \
     $(CBM_DIR)/cbm.c \
@@ -135,6 +137,33 @@ EXTRACTION_SRCS = \
 
 # LSP resolvers (compiled as one unit via lsp_all.c)
 LSP_SRCS = $(CBM_DIR)/lsp_all.c
+# lsp_all.c only #includes other sources — list them so edits trigger rebuild.
+LSP_ALL_INCLUDES = \
+	$(CBM_DIR)/lsp/type_rep.c \
+	$(CBM_DIR)/lsp/scope.c \
+	$(CBM_DIR)/lsp/type_registry.c \
+	$(CBM_DIR)/lsp/go_lsp.c \
+	$(CBM_DIR)/lsp/generated/go_stdlib_data.c \
+	$(CBM_DIR)/lsp/c_lsp.c \
+	$(CBM_DIR)/lsp/generated/c_stdlib_data.c \
+	$(CBM_DIR)/lsp/generated/cpp_stdlib_data.c \
+	$(CBM_DIR)/lsp/php_lsp.c \
+	$(CBM_DIR)/lsp/generated/php_stdlib_data.c \
+	$(CBM_DIR)/lsp/generated/python_stdlib_data.c \
+	$(CBM_DIR)/lsp/py_lsp.c \
+	$(CBM_DIR)/lsp/ts_lsp.c \
+	$(CBM_DIR)/lsp/cs_lsp.c \
+	$(CBM_DIR)/lsp/generated/cs_stdlib_data.c \
+	$(CBM_DIR)/lsp/java_lsp.c \
+	$(CBM_DIR)/lsp/generated/java_stdlib_data.c \
+	$(CBM_DIR)/lsp/generated/kotlin_stdlib_data.c \
+	$(CBM_DIR)/lsp/kotlin_lsp.c \
+	$(CBM_DIR)/lsp/generated/rust_stdlib_data.c \
+	$(CBM_DIR)/lsp/generated/rust_crates_seed.c \
+	$(CBM_DIR)/lsp/rust_cargo.c \
+	$(CBM_DIR)/lsp/rust_proc_macros.c \
+	$(CBM_DIR)/lsp/rust_rustdoc.c \
+	$(CBM_DIR)/lsp/rust_lsp.c
 
 # Header/source dependencies of the lsp_all unity object. lsp_all.c #includes
 # every lsp/*.c resolver, which in turn include cbm.h — and CBMCall is copied
@@ -229,6 +258,19 @@ UNIXCODER_BLOB_SRC = vendored/nomic/code_vectors_blob.S
 # Traces module (new)
 TRACES_SRCS = src/traces/traces.c
 
+# Test output ingestion (JUnit XML, stdout parsers, run_tests)
+TEST_INGEST_SRCS = \
+    src/test_ingest/test_result.c \
+    src/test_ingest/junit_xml.c \
+    src/test_ingest/go_test.c \
+    src/test_ingest/pytest.c \
+    src/test_ingest/sbt.c \
+    src/test_ingest/report_scan.c \
+    src/test_ingest/format_dispatch.c \
+    src/test_ingest/test_graph.c \
+    src/test_ingest/test_session.c \
+    src/test_ingest/run_tests.c
+
 # Watcher module (new)
 WATCHER_SRCS = src/watcher/watcher.c
 
@@ -294,8 +336,14 @@ TRE_CFLAGS = -std=c11 -g -O1 -w -Ivendored/tre
 # yyjson (vendored)
 YYJSON_SRC = vendored/yyjson/yyjson.c
 
+# yxml (vendored, JUnit XML streaming parser)
+YXML_SRC = vendored/yxml/yxml.c
+YXML_CFLAGS = -std=c11 -D_DEFAULT_SOURCE -O2 -w -Ivendored/yxml
+YXML_CFLAGS_TEST = -std=c11 -D_DEFAULT_SOURCE -g -O1 -w -Ivendored/yxml \
+                   $(SANITIZE)
+
 # All production sources
-PROD_SRCS = $(FOUNDATION_SRCS) $(STORE_SRCS) $(CYPHER_SRCS) $(MCP_SRCS) $(DISCOVER_SRCS) $(GRAPH_BUFFER_SRCS) $(PIPELINE_SRCS) $(SIMHASH_SRCS) $(SEMANTIC_SRCS) $(TRACES_SRCS) $(WATCHER_SRCS) $(GIT_SRCS) $(CLI_SRCS) $(UI_SRCS) $(YYJSON_SRC)
+PROD_SRCS = $(FOUNDATION_SRCS) $(STORE_SRCS) $(CYPHER_SRCS) $(MCP_SRCS) $(DISCOVER_SRCS) $(GRAPH_BUFFER_SRCS) $(PIPELINE_SRCS) $(SIMHASH_SRCS) $(SEMANTIC_SRCS) $(TRACES_SRCS) $(WATCHER_SRCS) $(GIT_SRCS) $(CLI_SRCS) $(UI_SRCS) $(YYJSON_SRC) $(YXML_SRC) $(TEST_INGEST_SRCS) $(RAW_ARTIFACT_SRCS)
 EXISTING_C_SRCS = $(EXTRACTION_SRCS) $(LSP_SRCS) $(TS_RUNTIME_SRC) \
                   $(GRAMMAR_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC)
 
@@ -354,7 +402,7 @@ TEST_WATCHER_SRCS = tests/test_watcher.c
 
 TEST_LZ4_SRCS = tests/test_lz4.c
 TEST_ZSTD_SRCS = tests/test_zstd.c
-TEST_ARTIFACT_SRCS = tests/test_artifact.c
+TEST_ARTIFACT_SRCS = tests/test_artifact.c tests/test_raw_artifact.c
 
 TEST_SQLITE_WRITER_SRCS = tests/test_sqlite_writer.c
 
@@ -385,7 +433,9 @@ TEST_JAVA_LSP_SRCS = tests/test_java_lsp.c tests/test_java_lsp_coverage.c
 TEST_KOTLIN_LSP_SRCS = tests/test_kotlin_lsp.c
 TEST_RUST_LSP_SRCS = tests/test_rust_lsp.c
 
-TEST_INTEGRATION_SRCS = tests/test_integration.c tests/test_incremental.c tests/test_lang_contract.c tests/test_edge_imports.c tests/test_edge_structural.c tests/test_lsp_resolution_probe.c tests/test_node_creation_probe.c tests/test_edge_types_probe.c tests/test_convergence_probe.c tests/test_matrix_known_classes.c tests/test_matrix_new_constructs.c tests/test_grammar_probe_a.c tests/test_grammar_probe_b.c tests/test_grammar_probe_c.c tests/test_grammar_probe_d.c tests/test_grammar_probe_e.c tests/test_grammar_probe_f.c tests/test_grammar_probe_g.c
+TEST_INTEGRATION_SRCS = tests/test_integration.c tests/test_incremental.c tests/test_test_ingest_integration.c tests/test_lang_contract.c tests/test_edge_imports.c tests/test_edge_structural.c tests/test_lsp_resolution_probe.c tests/test_node_creation_probe.c tests/test_edge_types_probe.c tests/test_convergence_probe.c tests/test_matrix_known_classes.c tests/test_matrix_new_constructs.c tests/test_grammar_probe_a.c tests/test_grammar_probe_b.c tests/test_grammar_probe_c.c tests/test_grammar_probe_d.c tests/test_grammar_probe_e.c tests/test_grammar_probe_f.c tests/test_grammar_probe_g.c
+
+TEST_INGEST_TEST_SRCS = tests/test_junit_xml.c tests/test_stdout_parsers.c tests/test_report_scan.c tests/test_test_graph.c tests/test_test_session.c tests/test_run_tests_exec.c
 
 TEST_TRACES_SRCS = tests/test_traces.c
 
@@ -470,7 +520,7 @@ TEST_REPRO_SRCS = \
     tests/repro/repro_lsp_java_cs.c \
     tests/repro/repro_lsp_kt_php_rust.c
 
-ALL_TEST_SRCS =$(TEST_FOUNDATION_SRCS) $(TEST_EXTRACTION_SRCS) $(TEST_STORE_SRCS) $(TEST_CYPHER_SRCS) $(TEST_MCP_SRCS) $(TEST_DISCOVER_SRCS) $(TEST_GRAPH_BUFFER_SRCS) $(TEST_PIPELINE_SRCS) $(TEST_WATCHER_SRCS) $(TEST_LZ4_SRCS) $(TEST_ZSTD_SRCS) $(TEST_ARTIFACT_SRCS) $(TEST_SQLITE_WRITER_SRCS) $(TEST_GO_LSP_SRCS) $(TEST_C_LSP_SRCS) $(TEST_PHP_LSP_SRCS) $(TEST_CS_LSP_SRCS) $(TEST_CS_LSP_BENCH_SRCS) $(TEST_SCOPE_SRCS) $(TEST_TYPE_REP_SRCS) $(TEST_PY_LSP_SRCS) $(TEST_PY_LSP_BENCH_SRCS) $(TEST_PY_LSP_STRESS_SRCS) $(TEST_PY_LSP_SCALE_SRCS) $(TEST_TS_LSP_SRCS) $(TEST_JAVA_LSP_SRCS) $(TEST_KOTLIN_LSP_SRCS) $(TEST_RUST_LSP_SRCS) $(TEST_TRACES_SRCS) $(TEST_CLI_SRCS) $(TEST_MEM_SRCS) $(TEST_UI_SRCS) $(TEST_HTTPD_SRCS) $(TEST_SECURITY_SRCS) $(TEST_YAML_SRCS) $(TEST_SEMANTIC_SRCS) $(TEST_AST_PROFILE_SRCS) $(TEST_SLAB_ALLOC_SRCS) $(TEST_SIMHASH_SRCS) $(TEST_STACK_OVERFLOW_SRCS) $(TEST_INTEGRATION_SRCS)
+ALL_TEST_SRCS =$(TEST_FOUNDATION_SRCS) $(TEST_EXTRACTION_SRCS) $(TEST_STORE_SRCS) $(TEST_CYPHER_SRCS) $(TEST_MCP_SRCS) $(TEST_DISCOVER_SRCS) $(TEST_GRAPH_BUFFER_SRCS) $(TEST_PIPELINE_SRCS) $(TEST_WATCHER_SRCS) $(TEST_LZ4_SRCS) $(TEST_ZSTD_SRCS) $(TEST_ARTIFACT_SRCS) $(TEST_SQLITE_WRITER_SRCS) $(TEST_GO_LSP_SRCS) $(TEST_C_LSP_SRCS) $(TEST_PHP_LSP_SRCS) $(TEST_CS_LSP_SRCS) $(TEST_CS_LSP_BENCH_SRCS) $(TEST_SCOPE_SRCS) $(TEST_TYPE_REP_SRCS) $(TEST_PY_LSP_SRCS) $(TEST_PY_LSP_BENCH_SRCS) $(TEST_PY_LSP_STRESS_SRCS) $(TEST_PY_LSP_SCALE_SRCS) $(TEST_TS_LSP_SRCS) $(TEST_JAVA_LSP_SRCS) $(TEST_KOTLIN_LSP_SRCS) $(TEST_RUST_LSP_SRCS) $(TEST_TRACES_SRCS) $(TEST_CLI_SRCS) $(TEST_MEM_SRCS) $(TEST_UI_SRCS) $(TEST_HTTPD_SRCS) $(TEST_SECURITY_SRCS) $(TEST_YAML_SRCS) $(TEST_SEMANTIC_SRCS) $(TEST_AST_PROFILE_SRCS) $(TEST_SLAB_ALLOC_SRCS) $(TEST_SIMHASH_SRCS) $(TEST_STACK_OVERFLOW_SRCS) $(TEST_INGEST_TEST_SRCS) $(TEST_INTEGRATION_SRCS)
 
 
 # ── Build directories ────────────────────────────────────────────
@@ -574,11 +624,20 @@ UNIXCODER_OBJ = $(BUILD_DIR)/unixcoder_blob.o
 $(UNIXCODER_OBJ): $(UNIXCODER_BLOB_SRC) vendored/nomic/code_vectors.bin | $(BUILD_DIR)
 	$(CC) -c -o $@ $<
 
-OBJS_VENDORED_TEST = $(MIMALLOC_OBJ_TEST) $(SQLITE3_OBJ_TEST) $(TRE_OBJ_TEST) $(GRAMMAR_OBJS_TEST) $(TS_RUNTIME_OBJ_TEST) $(LSP_OBJ_TEST) $(PP_OBJ_TEST) $(LZ4_OBJ_TEST) $(ZSTD_OBJ_TEST) $(UNIXCODER_OBJ)
+YXML_OBJ_TEST = $(BUILD_DIR)/yxml.o
+YXML_OBJ_PROD = $(BUILD_DIR)/prod_yxml.o
+
+$(BUILD_DIR)/yxml.o: $(YXML_SRC) | $(BUILD_DIR)
+	$(CC) $(YXML_CFLAGS_TEST) -c -o $@ $<
+
+$(BUILD_DIR)/prod_yxml.o: $(YXML_SRC) | $(BUILD_DIR)
+	$(CC) $(YXML_CFLAGS) -c -o $@ $<
+
+OBJS_VENDORED_TEST = $(MIMALLOC_OBJ_TEST) $(SQLITE3_OBJ_TEST) $(TRE_OBJ_TEST) $(GRAMMAR_OBJS_TEST) $(TS_RUNTIME_OBJ_TEST) $(LSP_OBJ_TEST) $(PP_OBJ_TEST) $(LZ4_OBJ_TEST) $(ZSTD_OBJ_TEST) $(YXML_OBJ_TEST) $(UNIXCODER_OBJ)
 
 $(BUILD_DIR)/test-runner: $(ALL_TEST_SRCS) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(OBJS_VENDORED_TEST) | $(BUILD_DIR)
 	$(CC) $(CFLAGS_TEST) -Itests -Itests/repro -o $@ \
-		$(ALL_TEST_SRCS) $(PROD_SRCS) \
+		$(ALL_TEST_SRCS) $(filter-out $(YXML_SRC),$(PROD_SRCS)) \
 		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
 		$(OBJS_VENDORED_TEST) \
 		$(LDFLAGS_TEST)
@@ -637,13 +696,13 @@ ZSTD_OBJ_PROD = $(BUILD_DIR)/prod_zstd.o
 $(BUILD_DIR)/prod_zstd.o: $(CBM_DIR)/vendored/zstd/zstd.c | $(BUILD_DIR)
 	$(CC) -std=c11 -D_DEFAULT_SOURCE -O2 -w -I$(CBM_DIR)/vendored/zstd -c -o $@ $<
 
-OBJS_VENDORED_PROD = $(MIMALLOC_OBJ_PROD) $(SQLITE3_OBJ_PROD) $(TRE_OBJ_PROD) $(GRAMMAR_OBJS_PROD) $(TS_RUNTIME_OBJ_PROD) $(LSP_OBJ_PROD) $(PP_OBJ_PROD) $(LZ4_OBJ_PROD) $(ZSTD_OBJ_PROD) $(UNIXCODER_OBJ)
+OBJS_VENDORED_PROD = $(MIMALLOC_OBJ_PROD) $(SQLITE3_OBJ_PROD) $(TRE_OBJ_PROD) $(GRAMMAR_OBJS_PROD) $(TS_RUNTIME_OBJ_PROD) $(LSP_OBJ_PROD) $(PP_OBJ_PROD) $(LZ4_OBJ_PROD) $(ZSTD_OBJ_PROD) $(YXML_OBJ_PROD) $(UNIXCODER_OBJ)
 
 MAIN_SRC = src/main.c
 
 $(BUILD_DIR)/codebase-memory-mcp: $(MAIN_SRC) $(PROD_SRCS) $(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) $(OBJS_VENDORED_PROD) | $(BUILD_DIR)
 	$(CC) $(CFLAGS_PROD) -o $@ \
-		$(MAIN_SRC) $(PROD_SRCS) \
+		$(MAIN_SRC) $(filter-out $(YXML_SRC),$(PROD_SRCS)) \
 		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
 		$(OBJS_VENDORED_PROD) \
 		$(LDFLAGS)
@@ -668,7 +727,7 @@ embed: frontend
 
 cbm-with-ui: embed $(OBJS_VENDORED_PROD)
 	$(CC) $(CFLAGS_PROD) -o $(BUILD_DIR)/codebase-memory-mcp \
-		$(MAIN_SRC) $(PROD_SRCS_WITH_ASSETS) \
+		$(MAIN_SRC) $(filter-out $(YXML_SRC),$(PROD_SRCS_WITH_ASSETS)) \
 		$(EXTRACTION_SRCS) $(AC_LZ4_SRCS) $(ZSTD_SRCS) $(SQLITE_WRITER_SRC) \
 		$(OBJS_VENDORED_PROD) \
 		$(wildcard $(BUILD_DIR)/embedded/embed_*.o) \
