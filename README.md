@@ -3,19 +3,20 @@
 [![GitHub Release](https://img.shields.io/github/v/release/DeusData/codebase-memory-mcp?style=flat&color=blue)](https://github.com/DeusData/codebase-memory-mcp/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/DeusData/codebase-memory-mcp/dry-run.yml?label=CI)](https://github.com/DeusData/codebase-memory-mcp/actions/workflows/dry-run.yml)
-[![Tests](https://img.shields.io/badge/tests-2812_passing-brightgreen)](https://github.com/DeusData/codebase-memory-mcp)
-[![Languages](https://img.shields.io/badge/languages-155-orange)](https://github.com/DeusData/codebase-memory-mcp)
+[![Tests](https://img.shields.io/badge/tests-5604_passing-brightgreen)](https://github.com/DeusData/codebase-memory-mcp)
+[![Languages](https://img.shields.io/badge/languages-158-orange)](https://github.com/DeusData/codebase-memory-mcp)
+[![Hybrid LSP](https://img.shields.io/badge/Hybrid_LSP-9_languages-blue)](#hybrid-lsp)
 [![Agents](https://img.shields.io/badge/agents-11-purple)](https://github.com/DeusData/codebase-memory-mcp)
 [![Pure C](https://img.shields.io/badge/pure_C-zero_dependencies-blue)](https://github.com/DeusData/codebase-memory-mcp)
 [![Platform](https://img.shields.io/badge/macOS_%7C_Linux_%7C_Windows-supported-lightgrey)](https://github.com/DeusData/codebase-memory-mcp/releases/latest)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/DeusData/codebase-memory-mcp/badge)](https://scorecard.dev/viewer/?uri=github.com/DeusData/codebase-memory-mcp)
 [![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev)
-[![VirusTotal](https://img.shields.io/badge/VirusTotal-0%2F72_engines-brightgreen?logo=virustotal)](https://www.virustotal.com/gui/file/7e6624b345f994afb901475e9120881241f125dfecd36772b5ade8e73485daf9/detection)
+[![VirusTotal](https://img.shields.io/badge/VirusTotal-scanned_every_release-brightgreen?logo=virustotal)](https://github.com/DeusData/codebase-memory-mcp/releases/latest)
 [![arXiv](https://img.shields.io/badge/arXiv-2603.27277-b31b1b?logo=arxiv)](https://arxiv.org/abs/2603.27277)
 
 **The fastest and most efficient code intelligence engine for AI coding agents.** Full-indexes an average repository in milliseconds, the Linux kernel (28M LOC, 75K files) in 3 minutes. Answers structural queries in under 1ms. Ships as a single static binary for macOS, Linux, and Windows — download, run `install`, done.
 
-High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-sitter/) AST analysis across all 155 languages, enhanced with LSP-style hybrid type resolution for Go, C, C++, and TypeScript / JavaScript / JSX / TSX (more languages coming soon) — producing a persistent knowledge graph of functions, classes, call chains, HTTP routes, and cross-service links. 14 MCP tools. Zero dependencies. Plug and play across 11 coding agents.
+High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-sitter/) AST analysis across all 158 languages, enhanced with [**Hybrid LSP** semantic type resolution](#hybrid-lsp) for Python, TypeScript / JavaScript / JSX / TSX, PHP, C#, Go, C, C++, Java, Kotlin, and Rust — producing a persistent knowledge graph of functions, classes, call chains, HTTP routes, and cross-service links. 14 MCP tools. Zero dependencies. Plug and play across 11 coding agents.
 
 > **Research** — The design and benchmarks behind this project are described in the preprint [*Codebase-Memory: Tree-Sitter-Based Knowledge Graphs for LLM Code Exploration via MCP*](https://arxiv.org/abs/2603.27277) (arXiv:2603.27277). Evaluated across 31 real-world repositories: 83% answer quality, 10× fewer tokens, 2.1× fewer tool calls vs. file-by-file exploration.
 
@@ -31,7 +32,7 @@ High-quality parsing through [tree-sitter](https://tree-sitter.github.io/tree-si
 
 - **Extreme indexing speed** — Linux kernel (28M LOC, 75K files) in 3 minutes. RAM-first pipeline: LZ4 compression, in-memory SQLite, fused Aho-Corasick pattern matching. Memory released after indexing.
 - **Plug and play** — single static binary for macOS (arm64/amd64), Linux (arm64/amd64), and Windows (amd64). No Docker, no runtime dependencies, no API keys. Download → `install` → restart agent → done.
-- **155 languages** — vendored tree-sitter grammars compiled into the binary. Nothing to install, nothing that breaks.
+- **158 languages** — vendored tree-sitter grammars compiled into the binary. Nothing to install, nothing that breaks.
 - **120x fewer tokens** — 5 structural queries: ~3,400 tokens vs ~412,000 via file-by-file search. One graph query replaces dozens of grep/read cycles.
 - **11 agents, one command** — `install` auto-detects Claude Code, Codex CLI, Gemini CLI, Zed, OpenCode, Antigravity, Aider, KiloCode, VS Code, OpenClaw, and Kiro — configures MCP entries, instruction files, and pre-tool hooks for each.
 - **Built-in graph visualization** — 3D interactive UI at `localhost:9749` (optional UI binary variant).
@@ -167,10 +168,10 @@ Removes all agent configs, skills, hooks, and instructions. Does not remove the 
 - `SEMANTICALLY_RELATED` (vocabulary-mismatch, same-language, score ≥ 0.80)
 
 ### Indexing pipeline
-- **155 vendored tree-sitter grammars** compiled into the binary
+- **158 vendored tree-sitter grammars** compiled into the binary
 - **Generic package / module resolution** — bare specifiers like `@myorg/pkg`, `github.com/foo/bar`, `use my_crate::foo` resolved via manifest scanning (`package.json`, `go.mod`, `Cargo.toml`, `pyproject.toml`, `composer.json`, `pubspec.yaml`, `pom.xml`, `build.gradle`, `mix.exs`, `*.gemspec`)
 - **Infrastructure-as-code indexing** — Dockerfiles, Kubernetes manifests, Kustomize overlays as graph nodes
-- **LSP-style hybrid type resolution** for Go, C, C++, and TypeScript / JavaScript / JSX / TSX (more languages coming) — clean-room reimplementation of tsserver / typescript-go's type resolution algorithms (parameter binding, return-type inference, generic substitution, JSX component dispatch, JSDoc inference for plain JS files)
+- **[Hybrid LSP semantic type resolution](#hybrid-lsp)** for Python, TypeScript / JavaScript / JSX / TSX, PHP, C#, Go, C, C++, Java, Kotlin, and Rust — a lightweight C implementation of language type-resolution algorithms, structurally inspired by and compatible with major language servers including tsserver / typescript-go, pyright, gopls, Roslyn, Eclipse JDT, and rust-analyzer (parameter binding, return-type inference, generic substitution, JSX component dispatch, JSDoc inference for plain JS files, namespace + trait + late-static-binding resolution for PHP, file-scoped namespaces + records + LINQ method syntax for C#, class-hierarchy + overload + lambda resolution for Java, extension-function + scope-function resolution for Kotlin, trait-method + UFCS resolution for Rust)
 - **RAM-first pipeline**: LZ4 compression, in-memory SQLite, single dump at end. Memory released after.
 
 ### Distribution & operation
@@ -203,7 +204,7 @@ codebase-memory-mcp is a **structural analysis backend** — it builds and queri
 ```
 You: "what calls ProcessOrder?"
 
-Agent calls: trace_call_path(function_name="ProcessOrder", direction="inbound")
+Agent calls: trace_path(function_name="ProcessOrder", direction="inbound")
 
 codebase-memory-mcp: executes graph query, returns structured results
 
@@ -218,7 +219,7 @@ Benchmarked on Apple M3 Pro:
 
 | Operation | Time | Notes |
 |-----------|------|-------|
-| **Linux kernel full index** | **3 min** | 28M LOC, 75K files → 2.1M nodes, 4.9M edges |
+| **Linux kernel full index** | **3 min** | 28M LOC, 75K files → 4.81M nodes, 7.72M edges |
 | Linux kernel fast index | 1m 12s | 1.88M nodes |
 | Django full index | ~6s | 49K nodes, 196K edges |
 | Cypher query | <1ms | Relationship traversal |
@@ -334,11 +335,11 @@ Restart your agent. Verify with `/mcp` — you should see `codebase-memory-mcp` 
 | Agent | MCP Config | Instructions | Hooks |
 |-------|-----------|-------------|-------|
 | Claude Code | `.claude/.mcp.json` | 4 Skills | PreToolUse (Grep/Glob graph augment, non-blocking) |
-| Codex CLI | `.codex/config.toml` | `.codex/AGENTS.md` | — |
-| Gemini CLI | `.gemini/settings.json` | `.gemini/GEMINI.md` | BeforeTool (grep reminder) |
+| Codex CLI | `.codex/config.toml` | `.codex/AGENTS.md` | SessionStart reminder |
+| Gemini CLI | `.gemini/settings.json` | `.gemini/GEMINI.md` | BeforeTool (grep reminder) + SessionStart reminder |
 | Zed | `settings.json` (JSONC) | — | — |
 | OpenCode | `opencode.json` | `AGENTS.md` | — |
-| Antigravity | `mcp_config.json` | `AGENTS.md` | — |
+| Antigravity | `.gemini/config/mcp_config.json` (shared) | `antigravity-cli/AGENTS.md` | SessionStart reminder |
 | Aider | — | `CONVENTIONS.md` | — |
 | KiloCode | `mcp_settings.json` | `~/.kilocode/rules/` | — |
 | VS Code | `Code/User/mcp.json` | — | — |
@@ -350,7 +351,9 @@ For Claude Code, the `PreToolUse` hook intercepts `Grep`/`Glob` (never `Read` �
 gating `Read` breaks the read-before-edit invariant) and, when the search
 token matches indexed symbols, injects them as `additionalContext` via
 `search_graph` so the agent gets structured context alongside its normal
-search results. For Gemini CLI, `BeforeTool` prints a short reminder.
+search results. For Codex, Gemini CLI, and Antigravity, a `SessionStart` hook
+injects a one-line code-discovery reminder as session context (Gemini CLI also
+keeps its `BeforeTool` reminder).
 The installed Claude shim file is named `cbm-code-discovery-gate` for
 backward compatibility with existing installs; despite the legacy name it
 never gates and never blocks.
@@ -362,7 +365,7 @@ Every MCP tool can be invoked from the command line:
 ```bash
 codebase-memory-mcp cli index_repository '{"repo_path": "/path/to/repo"}'
 codebase-memory-mcp cli search_graph '{"name_pattern": ".*Handler.*", "label": "Function"}'
-codebase-memory-mcp cli trace_call_path '{"function_name": "Search", "direction": "both"}'
+codebase-memory-mcp cli trace_path '{"function_name": "Search", "direction": "both"}'
 codebase-memory-mcp cli query_graph '{"query": "MATCH (f:Function) RETURN f.name LIMIT 5"}'
 codebase-memory-mcp cli list_projects
 codebase-memory-mcp cli --raw search_graph '{"label": "Function"}' | jq '.results[].name'
@@ -384,7 +387,7 @@ codebase-memory-mcp cli --raw search_graph '{"label": "Function"}' | jq '.result
 | Tool | Description |
 |------|-------------|
 | `search_graph` | Structured search by label, name pattern, file pattern, degree filters. Pagination via limit/offset. |
-| `trace_call_path` | BFS traversal — who calls a function and what it calls. Depth 1-5. |
+| `trace_path` | BFS traversal — who calls a function and what it calls (alias: `trace_call_path`). Depth 1-5. |
 | `detect_changes` | Map git diff to affected symbols + blast radius with risk classification. |
 | `query_graph` | Execute Cypher-like graph queries (read-only). |
 | `get_graph_schema` | Node/edge counts, relationship patterns, property definitions per label. Run this first. |
@@ -408,9 +411,17 @@ codebase-memory-mcp cli --raw search_graph '{"label": "Function"}' | jq '.result
 
 `get_code_snippet` uses qualified names: `<project>.<path_parts>.<name>`. Use `search_graph` to discover them first.
 
-### Supported Cypher Subset
+### Supported Cypher (openCypher read subset)
 
-`query_graph` supports: `MATCH` with labels and relationship types, variable-length paths, `WHERE` with comparisons/regex/CONTAINS, `RETURN` with property access and `COUNT`/`DISTINCT`, `ORDER BY`, `LIMIT`. Not supported: `WITH`, `COLLECT`, `OPTIONAL MATCH`, mutations.
+`query_graph` is a read-only openCypher subset:
+
+- **Clauses**: `MATCH`, `OPTIONAL MATCH`, multiple `MATCH`, `WHERE`, `WITH` (+ `WITH … WHERE`), `RETURN`, `ORDER BY`, `SKIP`, `LIMIT`, `DISTINCT`, `UNWIND`, `UNION` / `UNION ALL`, `CASE`.
+- **Patterns**: labelled nodes, label alternation `(n:A|B)`, relationship types/direction, variable-length paths `[*1..3]`, inline property maps.
+- **WHERE**: `= <> < <= > >=`, `AND/OR/XOR/NOT`, `IN`, `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `IS [NOT] NULL`, regex `=~`, label test `n:Label`, and `EXISTS { (n)-[:TYPE]->() }` (single-hop existence — great for dead-code, e.g. `WHERE NOT EXISTS { (f)<-[:CALLS]-() }`).
+- **Aggregates**: `count` (+`DISTINCT`), `sum`, `avg`, `min`, `max`, `collect`.
+- **Functions**: `labels`, `type`, `id`, `keys`, `properties`; `toLower/toUpper/toString/toInteger/toFloat/toBoolean`; `size`, `length`, `trim/ltrim/rtrim`, `reverse`; `coalesce`, `substring`, `replace`, `left`, `right`.
+
+Anything outside this subset (write/`MERGE`/`CALL` clauses, unsupported functions, list/map literals, comprehensions, path functions, parameters) **fails with a clear `unsupported …` error** rather than returning empty results.
 
 ## Ignoring Files
 
@@ -432,6 +443,8 @@ codebase-memory-mcp config reset auto_index              # reset to default
 | `CBM_CACHE_DIR` | `~/.cache/codebase-memory-mcp` | Override the database storage directory. All project indexes and config are stored here. |
 | `CBM_DIAGNOSTICS` | `false` | Set to `1` or `true` to enable periodic diagnostics output to `/tmp/cbm-diagnostics-<pid>.json`. |
 | `CBM_DOWNLOAD_URL` | *(GitHub releases)* | Override the download URL for updates. Used for testing or self-hosted deployments. |
+| `CBM_LOG_LEVEL` | `info` | Set the minimum log level. Accepted values (case-insensitive): `debug`, `info`, `warn`, `error`, `none` — or their numeric equivalents `0`–`4` matching the internal enum. Logs go to stderr; stdout is reserved for MCP JSON-RPC. |
+| `CBM_WORKERS` | *(detected)* | Override the parallel-indexing worker count returned by `cbm_default_worker_count`. Useful inside containers where `sysconf(_SC_NPROCESSORS_ONLN)` reports host CPUs rather than the cgroup's effective quota. Range 1–256; invalid values are ignored with a warning. |
 
 ```bash
 # Store indexes in a custom directory
@@ -466,14 +479,43 @@ SQLite databases stored at `~/.cache/codebase-memory-mcp/`. Persists across rest
 |---------|-----|
 | `/mcp` doesn't show the server | Check `.mcp.json` path is absolute. Restart agent. Test: `echo '{}' \| /path/to/binary` should output JSON. |
 | `index_repository` fails | Pass absolute path: `index_repository(repo_path="/absolute/path")` |
-| `trace_call_path` returns 0 results | Use `search_graph(name_pattern=".*PartialName.*")` first to find the exact name. |
+| `trace_path` returns 0 results | Use `search_graph(name_pattern=".*PartialName.*")` first to find the exact name. |
 | Queries return wrong project results | Add `project="name"` parameter. Use `list_projects` to see names. |
 | Binary not found after install | Add to PATH: `export PATH="$HOME/.local/bin:$PATH"` |
 | UI not loading | Ensure you downloaded the `ui` variant and ran `--ui=true`. Check `http://localhost:9749`. |
 
+## Hybrid LSP
+
+**Semantic type resolution beyond tree-sitter.**
+
+Tree-sitter alone gives a syntactic AST. That handles naming, structure, and call sites well, but it can't tell you that `user.profile.display_name()` resolves to `Profile.display_name` declared three modules away — tree-sitter doesn't track imports, generics, inheritance, or stdlib types.
+
+codebase-memory-mcp ships a **lightweight C implementation of language type-resolution algorithms, structurally inspired by and compatible with major language servers** (tsserver / typescript-go, pyright, gopls, Roslyn, Eclipse JDT, rust-analyzer), embedded directly into the static binary. No language server process, no per-project setup, no API key. We call this layer **Hybrid LSP**: it runs alongside tree-sitter on every parse and refines `CALLS`, `USAGE`, and `RESOLVED_CALLS` edges with type information, so the resulting graph mirrors what an IDE "Go to Definition" would resolve.
+
+**Languages with full Hybrid LSP:**
+
+| Language | What it handles |
+|----------|-----------------|
+| **Python** *(new in v0.7.0)* | imports + dotted submodule walks, dataclasses, `Self` return types, generics, `@property`, `match/case` class patterns, SQLAlchemy 2.0 `Mapped[T]`, Pydantic `BaseModel`, `typing.Annotated` / `ClassVar` / `Final` / `InitVar`, async/await, classmethod/staticmethod, narrowing (`isinstance` / `is not None` / walrus), `typing.cast` / `assert_type`, common stdlib (logging, pathlib, json, functools). Target ~95% resolution on idiomatic code. |
+| **TypeScript / JavaScript / JSX / TSX** | generics, JSX component dispatch, JSDoc inference for plain JS, `.d.ts` declarations, module re-exports, method chaining via return-type propagation, per-file overlay chained to a shared cross-file registry |
+| **PHP** *(new in v0.7.0)* | namespaces, traits, late-static-binding, PHPDoc inference, parameter binding, return-type inference |
+| **C#** *(new in v0.7.0)* | global usings, file-scoped namespaces, records (incl. C# 12 primary constructors), LINQ method syntax, `async Task<T>` / `ValueTask<T>` unwrap, generic methods, `this` / `base` dispatch, `var` inference, common BCL stdlib |
+| **Go** *(sharpened in v0.7.0)* | pre-built per-package cross-file registry, generics, embedded structs, interface satisfaction, package-aware import resolution |
+| **C / C++** *(sharpened in v0.7.0)* | pre-built per-language cross-file registry shared across C and C++; C side handles macros + `typedef` chains + header-vs-source linking; C++ side handles templates, namespaces, `auto` inference, and method resolution via class hierarchy |
+| **Java** *(new in v0.8.0)* | imports (single-type, on-demand, static), class hierarchies with `this` / `super` dispatch, generics, annotations, overload matching by arity and parameter types, lambdas / method references bound to functional interfaces, field-type inference, common JDK stdlib |
+| **Kotlin** *(new in v0.8.0)* | imports + same-package resolution, classes / objects / companion objects, extension functions, data classes, nullable-type unwrapping, scope functions (`let` / `apply` / `run` / `also` / `with`), infix calls, common stdlib |
+| **Rust** *(new in v0.8.0)* | `use` declarations + module paths, `impl` blocks and trait methods, struct fields, generics with trait bounds, operator-trait desugaring, derive-macro method synthesis, UFCS static paths, common std prelude |
+
+**Two-layer architecture:**
+
+1. **Tree-sitter pass** — fast, syntactic, runs for every one of the 158 languages. Extracts definitions, calls, imports.
+2. **Hybrid LSP pass** — type-aware, runs above the tree-sitter pass per-language. Refines call edges using the import graph plus a per-file or pre-built cross-file definition registry. Languages without a Hybrid LSP pass yet fall back to textual resolution, so you always get *some* answer.
+
+The result is a knowledge graph accurate enough to drive `trace_path` across packages, inheritance hierarchies, and stdlib calls — without paying for a language server process per project.
+
 ## Language Support
 
-155 languages, all parsed via vendored tree-sitter grammars compiled into the binary. Benchmarked against 64 real open-source repositories (78 to 49K nodes):
+158 languages, all parsed via vendored tree-sitter grammars compiled into the binary. Benchmarked against 64 real open-source repositories (78 to 49K nodes):
 
 | Tier | Score | Languages |
 |------|-------|-----------|
@@ -498,7 +540,7 @@ src/
   traces/             Runtime trace ingestion
   ui/                 Embedded HTTP server + 3D graph visualization
   foundation/         Platform abstractions (threads, filesystem, logging, memory)
-internal/cbm/         Vendored tree-sitter grammars (155 languages) + AST extraction engine
+internal/cbm/         Vendored tree-sitter grammars (158 languages) + AST extraction engine
 ```
 
 ## Security
@@ -512,15 +554,15 @@ Every release binary is verified through a multi-layer pipeline before publicati
 - **CodeQL SAST** — blocks release pipeline if any open alerts remain
 - **Zero runtime dependencies** — no transitive supply chain; all libraries vendored at compile time
 
-### v0.6.1 VirusTotal scans
+### v0.7.0 VirusTotal scans
 
 | Binary | SHA-256 | VirusTotal |
 |--------|---------|-----------|
-| `linux-amd64` | `7e6624b345f994afb901...` | [0/72 ✅](https://www.virustotal.com/gui/file/7e6624b345f994afb901475e9120881241f125dfecd36772b5ade8e73485daf9/detection) |
-| `linux-arm64` | `ac2498c45235c1bf37f8...` | [0/72 ✅](https://www.virustotal.com/gui/file/ac2498c45235c1bf37f8ef611bdb55c2e615fd445f7045708d7fdf2f9bda5e89/detection) |
-| `darwin-arm64` | `3e72c8cb364c431d99f1...` | [0/72 ✅](https://www.virustotal.com/gui/file/3e72c8cb364c431d99f183a15152db448075b150c755c9bd383fa785875c85d2/detection) |
-| `darwin-amd64` | `7836878876c8956f6413...` | [0/72 ✅](https://www.virustotal.com/gui/file/7836878876c8956f64132864f3122dab8766a26b21f5ae77d89d48f58a7a8219/detection) |
-| `windows-amd64` | `d773be23ed0823d58677...` | [0/72 ✅](https://www.virustotal.com/gui/file/d773be23ed0823d58677453029160486becb495642cca2a81bc14f099353c46b/detection) |
+| `linux-amd64` | `8e12bb2d6ead7f20a6d3...` | [0/72 ✅](https://www.virustotal.com/gui/file/8e12bb2d6ead7f20a6d3bf2be1e51f978c38acce810f0734f510d134b039d152/detection) |
+| `linux-arm64` | `10f7136bfbf3950c6b2a...` | [0/72 ✅](https://www.virustotal.com/gui/file/10f7136bfbf3950c6b2a1a950bbf85e88b97ee55ab00b4dfbc2a5e9c2ede8672/detection) |
+| `darwin-arm64` | `7062a7408906344bf4f8...` | [0/72 ✅](https://www.virustotal.com/gui/file/7062a7408906344bf4f835e9580048af85d12dd2b7cec0edf869df93ad9a0592/detection) |
+| `darwin-amd64` | `28c6d640e1a0ac7bfcab...` | [0/72 ✅](https://www.virustotal.com/gui/file/28c6d640e1a0ac7bfcab5094c2186eced5264a20dcdffcb4455a1b28c5df2171/detection) |
+| `windows-amd64` | `9c3ddcf78368fd4fa891...` | [0/72 ✅](https://www.virustotal.com/gui/file/9c3ddcf78368fd4fa89156a553641bf1e03640b4fb6dd29a12c84aa5bc98cd86/detection) |
 
 Scan links for every release are also included in the GitHub Release notes automatically.
 

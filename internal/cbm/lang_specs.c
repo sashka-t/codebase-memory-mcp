@@ -79,7 +79,6 @@ extern const TSLanguage *tree_sitter_gleam(void);
 extern const TSLanguage *tree_sitter_powershell(void);
 extern const TSLanguage *tree_sitter_pascal(void);
 extern const TSLanguage *tree_sitter_d(void);
-extern const TSLanguage *tree_sitter_nim(void);
 extern const TSLanguage *tree_sitter_scheme(void);
 extern const TSLanguage *tree_sitter_fennel(void);
 extern const TSLanguage *tree_sitter_fish(void);
@@ -98,6 +97,9 @@ extern const TSLanguage *tree_sitter_teal(void);
 extern const TSLanguage *tree_sitter_hare(void);
 extern const TSLanguage *tree_sitter_pony(void);
 extern const TSLanguage *tree_sitter_luau(void);
+extern const TSLanguage *tree_sitter_qmljs(void);
+extern const TSLanguage *tree_sitter_cfscript(void);
+extern const TSLanguage *tree_sitter_cfml(void);
 extern const TSLanguage *tree_sitter_janet_simple(void);
 extern const TSLanguage *tree_sitter_sway(void);
 extern const TSLanguage *tree_sitter_nasm(void);
@@ -249,6 +251,40 @@ static const char *ts_class_types[] = {"class_declaration",
                                        NULL};
 static const char *ts_decorator_types[] = {"decorator", NULL};
 
+// ==================== QML (Qt) ====================
+// QMLJS grammar is a TypeScript superset plus declarative ui_* nodes, so the
+// JS/TS function, call, branch, variable and module arrays are reused as-is.
+static const char *qml_class_types[] = {"class_declaration",
+                                        "class",
+                                        "abstract_class_declaration",
+                                        "enum_declaration",
+                                        "interface_declaration",
+                                        "ui_inline_component",
+                                        NULL};
+static const char *qml_field_types[] = {"ui_property", "ui_signal", "public_field_definition",
+                                        NULL};
+static const char *qml_import_types[] = {"import_statement", "import", "ui_import", NULL};
+
+// ==================== CFScript (CFML .cfc script dialect) ====================
+// JS-like grammar: components contain function/method declarations. Reuses the
+// JS call/branch/var/module arrays.
+static const char *cfscript_func_types[] = {"function_declaration", "function_expression",
+                                            "arrow_function", "method_definition", NULL};
+static const char *cfscript_field_types[] = {"property_declaration", NULL};
+static const char *cfscript_import_types[] = {"import_statement", "import", NULL};
+
+// ==================== CFML (tag dialect — .cfm templates) ====================
+// Tag-based grammar (HTML-derived). Embedded <cfscript> functions appear as
+// function_declaration/function_expression; tag <cffunction> nodes
+// (cf_function_tag) are handled separately in the definition walker because
+// their name lives in a cf_attribute rather than a `name` field.
+static const char *cfml_func_types[] = {"function_declaration", "function_expression", NULL};
+static const char *cfml_call_types[] = {"call_expression", NULL};
+static const char *cfml_branch_types[] = {
+    "cf_if_tag",     "cf_elseif_tag",   "cf_else_tag",      "if_statement",
+    "for_statement", "while_statement", "switch_statement", NULL};
+static const char *cfml_module_types[] = {"program", "component_file", NULL};
+
 // ==================== RUST ====================
 static const char *rust_func_types[] = {"function_item", "function_signature_item",
                                         "closure_expression", NULL};
@@ -280,7 +316,7 @@ static const char *java_class_types[] = {"class_declaration",   "interface_decla
                                          "package_declaration", NULL};
 static const char *java_field_types[] = {"field_declaration", NULL};
 static const char *java_module_types[] = {"program", NULL};
-static const char *java_call_types[] = {"method_invocation", NULL};
+static const char *java_call_types[] = {"method_invocation", "object_creation_expression", NULL};
 static const char *java_import_types[] = {"import_declaration", "extends", "import", NULL};
 static const char *java_branch_types[] = {
     "if_statement",    "for_statement",     "enhanced_for_statement",
@@ -326,7 +362,7 @@ static const char *cs_class_types[] = {"class_declaration",
                                        "type_declaration",
                                        NULL};
 static const char *cs_module_types[] = {"compilation_unit", NULL};
-static const char *cs_call_types[] = {"invocation_expression", NULL};
+static const char *cs_call_types[] = {"invocation_expression", "object_creation_expression", NULL};
 static const char *cs_import_types[] = {"using_directive", "namespace_use_declaration",
                                         "using_statement", "namespace_declaration", NULL};
 static const char *cs_branch_types[] = {"if_statement",    "for_statement",    "foreach_statement",
@@ -334,7 +370,11 @@ static const char *cs_branch_types[] = {"if_statement",    "for_statement",    "
                                         "try_statement",   "catch_clause",     NULL};
 static const char *cs_var_types[] = {"field_declaration", "local_declaration_statement", NULL};
 static const char *cs_field_types[] = {"field_declaration", "property_declaration", NULL};
-static const char *cs_assign_types[] = {"assignment_expression", NULL};
+/* tree-sitter-c-sharp models `x++`/`++x` as postfix_/prefix_unary_expression
+ * (there is no `update_expression` node — that is a JS/TS kind), so a static
+ * field bump like `_count++` must list those node kinds to emit a WRITES. */
+static const char *cs_assign_types[] = {"assignment_expression", "postfix_unary_expression",
+                                        "prefix_unary_expression", NULL};
 static const char *cs_throw_types[] = {"throw_statement", "throw_expression", NULL};
 static const char *cs_decorator_types[] = {"attribute", NULL};
 
@@ -347,9 +387,9 @@ static const char *php_class_types[] = {"trait_declaration", "enum_declaration",
 static const char *php_import_types[] = {"extends", "include",         "namespace_use_declaration",
                                          "require", "use_declaration", NULL};
 static const char *php_module_types[] = {"program", NULL};
-static const char *php_call_types[] = {"member_call_expression", "scoped_call_expression",
-                                       "function_call_expression",
-                                       "nullsafe_member_call_expression", NULL};
+static const char *php_call_types[] = {
+    "member_call_expression",     "scoped_call_expression",          "function_call_expression",
+    "object_creation_expression", "nullsafe_member_call_expression", NULL};
 static const char *php_branch_types[] = {"if_statement",    "for_statement",    "foreach_statement",
                                          "while_statement", "switch_statement", "case_statement",
                                          "try_statement",   "catch_clause",     NULL};
@@ -375,8 +415,9 @@ static const char *scala_class_types[] = {"class_definition", "object_definition
                                           "trait_definition", "enum_definition",
                                           "type_definition",  NULL};
 static const char *scala_module_types[] = {"compilation_unit", NULL};
-static const char *scala_call_types[] = {"call_expression", "generic_function", "field_expression",
-                                         "infix_expression", NULL};
+static const char *scala_call_types[] = {"call_expression",     "generic_function",
+                                         "field_expression",    "infix_expression",
+                                         "instance_expression", NULL};
 static const char *scala_import_types[] = {"import_declaration", "extends", "import",
                                            "using_directive", NULL};
 static const char *scala_branch_types[] = {
@@ -386,6 +427,7 @@ static const char *scala_var_types[] = {"val_definition", "var_definition", "val
                                         "var_declaration", NULL};
 static const char *scala_assign_types[] = {"assignment_expression", NULL};
 static const char *scala_throw_types[] = {"throw_expression", NULL};
+static const char *scala_decorator_types[] = {"annotation", NULL};
 
 // ==================== KOTLIN ====================
 static const char *kotlin_func_types[] = {"function_declaration", "secondary_constructor",
@@ -464,7 +506,9 @@ static const char *elixir_branch_types[] = {"call", NULL};
 static const char *elixir_var_types[] = {"binary_operator", NULL};
 
 // ==================== HASKELL ====================
-static const char *haskell_func_types[] = {"function", "signature", NULL};
+/* "bind" = a nullary value binding (`foo = 1`); has a `name` field like `function`.
+ * `signature` (type annotations) is suppressed in resolve_func_name so it never doubles. */
+static const char *haskell_func_types[] = {"function", "signature", "bind", NULL};
 static const char *haskell_class_types[] = {"class", "data_type", "newtype", NULL};
 static const char *haskell_module_types[] = {"haskell", NULL};
 static const char *haskell_call_types[] = {"infix", "apply", NULL};
@@ -654,7 +698,12 @@ static const char *clojure_module_types[] = {"source", NULL};
 static const char *clojure_call_types[] = {"list_lit", NULL};
 
 // ==================== F# ====================
-static const char *fsharp_func_types[] = {"function_declaration", "value_declaration", NULL};
+/* Top-level `let f () = ...` parses to function_or_value_defn (module-level
+ * value_declaration is aliased to declaration_expression, which wraps it). The
+ * name lives on a function_declaration_left/value_declaration_left child — see
+ * the CBM_LANG_FSHARP branch in resolve_func_name. */
+static const char *fsharp_func_types[] = {"function_declaration", "value_declaration",
+                                          "function_or_value_defn", NULL};
 static const char *fsharp_class_types[] = {"type_definition", "exception_definition", NULL};
 static const char *fsharp_module_types[] = {"file", NULL};
 static const char *fsharp_call_types[] = {"application_expression", "dot_expression", NULL};
@@ -711,7 +760,10 @@ static const char *elm_import_types[] = {"import", NULL};
 static const char *elm_branch_types[] = {"case_of_expr", "if_else_expr", NULL};
 
 // ==================== FORTRAN ====================
-static const char *fortran_func_types[] = {"function", "subroutine", "function_statement", NULL};
+/* subroutine/function wrap an inner *_statement that carries the `name` field;
+ * function_statement was already present, subroutine_statement was missing. */
+static const char *fortran_func_types[] = {"function", "subroutine", "function_statement",
+                                           "subroutine_statement", NULL};
 static const char *fortran_class_types[] = {"derived_type_definition", "enum_statement", NULL};
 static const char *fortran_module_types[] = {"translation_unit", NULL};
 static const char *fortran_call_types[] = {"call_expression", "keyword_argument", "call", NULL};
@@ -776,6 +828,7 @@ static const char *makefile_import_types[] = {"include_directive", "include", NU
 static const char *makefile_var_types[] = {"variable_assignment", NULL};
 
 // ==================== CMAKE ====================
+static const char *cmake_func_types[] = {"function_def", "macro_def", NULL};
 static const char *cmake_module_types[] = {"source_file", NULL};
 static const char *cmake_call_types[] = {"normal_command", NULL};
 
@@ -814,6 +867,10 @@ static const CBMEmbeddedLangSpec html_embedded_imports[] = {
     {NULL, NULL, 0},
 };
 static const CBMEmbeddedLangSpec astro_embedded_imports[] = {
+    /* Astro component scripts live in the `---` frontmatter fence, which the
+     * grammar keeps as an unparsed frontmatter_js_block. Re-parse that slice
+     * with the JS grammar so `import X from './X.astro'` becomes a real edge. */
+    {"frontmatter", "frontmatter_js_block", CBM_LANG_JAVASCRIPT},
     {"script_element", "raw_text", CBM_LANG_JAVASCRIPT},
     {NULL, NULL, 0},
 };
@@ -999,27 +1056,6 @@ static const char *pascal_assign_types[] = {"assignment", NULL};
 static const char *pascal_throw_types[] = {"raise", NULL};
 static const char *pascal_module_types[] = {"source_file", NULL};
 static const char *d_module_types[] = {"source_file", NULL};
-static const char *nim_func_types[] = {
-    "proc_declaration",     "func_declaration",  "method_declaration",    "iterator_declaration",
-    "template_declaration", "macro_declaration", "converter_declaration", NULL};
-static const char *nim_class_types[] = {"type_declaration", "object_declaration",
-                                        "enum_declaration", "concept_declaration", NULL};
-static const char *nim_field_types[] = {"field_declaration", NULL};
-static const char *nim_call_types[] = {"call", "dot_generic_call", NULL};
-static const char *nim_import_types[] = {"import_statement",
-                                         "import_from_statement",
-                                         "include_statement",
-                                         "export_statement",
-                                         "import",
-                                         "include",
-                                         NULL};
-static const char *nim_branch_types[] = {"if_statement", "for",           "while", "case",
-                                         "try",          "except_clause", "when",  NULL};
-static const char *nim_var_types[] = {"var_section", "let_section", "const_section", NULL};
-static const char *nim_assign_types[] = {"assignment", NULL};
-static const char *nim_throw_types[] = {"raise_statement", NULL};
-static const char *nim_decorator_types[] = {"pragma", NULL};
-static const char *nim_module_types[] = {"source_file", NULL};
 static const char *scheme_call_types[] = {"list", NULL};
 static const char *scheme_var_types[] = {"symbol", NULL};
 static const char *scheme_module_types[] = {"program", NULL};
@@ -1163,7 +1199,8 @@ static const char *hare_branch_types[] = {"if_statement", "for_statement", "swit
 static const char *hare_var_types[] = {"let_declaration", "const_declaration", NULL};
 static const char *hare_assign_types[] = {"assignment_expression", NULL};
 static const char *hare_module_types[] = {"source_file", NULL};
-static const char *pony_func_types[] = {"fun", "be", "new", "lambda_expression", NULL};
+static const char *pony_func_types[] = {"method", "constructor", "ffi_method", "lambda_expression",
+                                        NULL};
 static const char *pony_class_types[] = {
     "actor_definition",     "class_definition",     "struct_definition", "trait_definition",
     "interface_definition", "primitive_definition", "type_alias",        NULL};
@@ -1199,11 +1236,13 @@ static const char *sway_branch_types[] = {"if_expression", "match_expression", "
 static const char *sway_var_types[] = {"let_declaration", "const_item", NULL};
 static const char *sway_assign_types[] = {"assignment_expression", NULL};
 static const char *sway_module_types[] = {"source_file", NULL};
+static const char *nasm_func_types[] = {"label", "preproc_def", "preproc_multiline_macro", NULL};
 static const char *nasm_class_types[] = {"struc_declaration", NULL};
 static const char *nasm_call_types[] = {"call_syntax_expression", NULL};
 static const char *nasm_import_types[] = {"preproc_include", NULL};
 static const char *nasm_var_types[] = {"label", NULL};
 static const char *nasm_module_types[] = {"source_file", NULL};
+static const char *assembly_func_types[] = {"label", NULL};
 static const char *assembly_var_types[] = {"label", NULL};
 static const char *assembly_module_types[] = {"program", NULL};
 static const char *astro_module_types[] = {"document", NULL};
@@ -1214,7 +1253,8 @@ static const char *just_import_types[] = {"import", NULL};
 static const char *just_branch_types[] = {"if_expression", NULL};
 static const char *just_assign_types[] = {"assignment", NULL};
 static const char *just_module_types[] = {"source_file", NULL};
-static const char *gotemplate_call_types[] = {"function_call", "method_call", NULL};
+static const char *gotemplate_call_types[] = {"function_call", "method_call", "template_action",
+                                              NULL};
 static const char *gotemplate_module_types[] = {"template", NULL};
 static const char *templ_func_types[] = {"function_declaration", "method_declaration",
                                          "method_elem", NULL};
@@ -1269,8 +1309,10 @@ static const char *thrift_import_types[] = {"include_statement", "extends", "inc
 static const char *thrift_var_types[] = {"const_definition", NULL};
 static const char *thrift_module_types[] = {"document", NULL};
 static const char *capnp_func_types[] = {"method", NULL};
-static const char *capnp_class_types[] = {"struct",          "enum", "interface", "custom_type",
-                                          "type_definition", NULL};
+/* custom_type (a type REFERENCE inside field_type) and type_definition (LHS of a
+ * `using X = ...` directive) are not top-level type defs — including them would
+ * mint spurious Class nodes for every typed field/return. */
+static const char *capnp_class_types[] = {"struct", "enum", "interface", NULL};
 static const char *capnp_field_types[] = {"field", NULL};
 static const char *capnp_import_types[] = {"import", "extends", "using_directive", NULL};
 static const char *capnp_var_types[] = {"const", NULL};
@@ -1324,7 +1366,7 @@ static const char *vhdl_branch_types[] = {"if_statement", "case_statement", "loo
 static const char *vhdl_var_types[] = {"variable_declaration", "signal_declaration",
                                        "constant_declaration", NULL};
 static const char *vhdl_assign_types[] = {"variable_assignment", "signal_assignment", NULL};
-static const char *vhdl_func_types[] = {"subprogram_declaration", NULL};
+static const char *vhdl_func_types[] = {"subprogram_declaration", "subprogram_definition", NULL};
 static const char *vhdl_module_types[] = {"design_file", NULL};
 static const char *systemverilog_func_types[] = {"function_declaration", "task_declaration",
                                                  "function_body_declaration", "function_statement",
@@ -1373,6 +1415,8 @@ static const char *smali_class_types[] = {"class_definition", NULL};
 static const char *smali_field_types[] = {"field_definition", NULL};
 static const char *smali_import_types[] = {"super_directive", "implements_directive", NULL};
 static const char *smali_module_types[] = {"source_file", NULL};
+static const char *tablegen_func_types[] = {"def", "multiclass", "defm", NULL};
+static const char *tablegen_class_types[] = {"class", NULL};
 static const char *tablegen_import_types[] = {"include", "include_directive", NULL};
 static const char *tablegen_module_types[] = {"source_file", NULL};
 static const char *ispc_func_types[] = {"function_definition", NULL};
@@ -1397,7 +1441,9 @@ static const char *cairo_var_types[] = {"let_declaration", "const_item", NULL};
 static const char *cairo_assign_types[] = {"assignment_expression", NULL};
 static const char *cairo_module_types[] = {"source_file", NULL};
 static const char *move_func_types[] = {"function_item", NULL};
-static const char *move_class_types[] = {"struct", "enum", NULL};
+/* This vendored move grammar models only function_item + module as named defs;
+ * "struct"/"enum" exist only as anonymous keyword tokens, never as parent nodes,
+ * so there is no class/struct/enum definition node to match. */
 static const char *move_call_types[] = {"call_expression", NULL};
 static const char *move_import_types[] = {"use_declaration", NULL};
 static const char *move_branch_types[] = {"if_expression", "while_expression", "loop_expression",
@@ -1459,8 +1505,10 @@ static const char *smithy_class_types[] = {"structure_statement", "union_stateme
 static const char *smithy_field_types[] = {"shape_member", NULL};
 static const char *smithy_import_types[] = {"use_statement", NULL};
 static const char *smithy_module_types[] = {"source_file", NULL};
-static const char *wit_func_types[] = {"func_item", "resource_method", NULL};
-static const char *wit_class_types[] = {"record_item", "resource_item", NULL};
+static const char *wit_func_types[] = {"func_item", "resource_method", "export_item", "import_item",
+                                       NULL};
+static const char *wit_class_types[] = {"record_item",   "resource_item", "enum_items",
+                                        "variant_items", "flags_items",   NULL};
 static const char *wit_field_types[] = {"record_field", NULL};
 static const char *wit_import_types[] = {
     "import_item", "toplevel_use_item", "export_item", "import", "include", "include_item", NULL};
@@ -1501,7 +1549,6 @@ static const char *soql_module_types[] = {"source_file", NULL};
 static const char *sosl_import_types[] = {"with_clause", NULL};
 static const char *sosl_module_types[] = {"source_file", NULL};
 
-static const char *make_func_types[] = {"recipe", NULL};
 static const char *make_import_types[] = {"include", "include_directive", NULL};
 
 // ==================== PINE SCRIPT ====================
@@ -1510,10 +1557,10 @@ static const char *pine_func_types[] = {"function_declaration_statement", NULL};
 static const char *pine_class_types[] = {"type_definition_statement", NULL};
 static const char *pine_module_types[] = {"source_file", NULL};
 static const char *pine_call_types[] = {"call", NULL};
-static const char *pine_var_types[] = {"variable_definition_statement", "tuple_declaration_statement",
-                                       NULL};
-static const char *pine_branch_types[] = {"if_statement",       "switch_statement", "for_statement",
-                                          "for_in_statement",   "while_statement",  NULL};
+static const char *pine_var_types[] = {"variable_definition_statement",
+                                       "tuple_declaration_statement", NULL};
+static const char *pine_branch_types[] = {"if_statement",     "switch_statement", "for_statement",
+                                          "for_in_statement", "while_statement",  NULL};
 static const char *pine_assign_types[] = {"reassignment_statement", NULL};
 // ==================== SPEC TABLE ====================
 
@@ -1528,7 +1575,8 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     [CBM_LANG_PYTHON] = {CBM_LANG_PYTHON, py_func_types, py_class_types, empty_types,
                          py_module_types, py_call_types, py_import_types, py_import_from_types,
                          py_branch_types, py_var_types, py_var_types, py_throw_types, NULL,
-                         py_decorator_types, py_env_funcs, py_env_members, tree_sitter_python, NULL},
+                         py_decorator_types, py_env_funcs, py_env_members, tree_sitter_python,
+                         NULL},
 
     // CBM_LANG_JAVASCRIPT
     [CBM_LANG_JAVASCRIPT] =
@@ -1538,11 +1586,13 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
          js_throw_types, NULL, empty_types, NULL, js_env_members, tree_sitter_javascript, NULL},
 
     // CBM_LANG_TYPESCRIPT
-    [CBM_LANG_TYPESCRIPT] =
-        {CBM_LANG_TYPESCRIPT, ts_func_types, ts_class_types, empty_types, js_module_types,
-         js_call_types, js_import_types, js_import_types, js_branch_types, js_var_types,
-         (const char *[]){"assignment_expression", "augmented_assignment_expression", NULL},
-         js_throw_types, NULL, ts_decorator_types, NULL, ts_env_members, tree_sitter_typescript, NULL},
+    [CBM_LANG_TYPESCRIPT] = {CBM_LANG_TYPESCRIPT, ts_func_types, ts_class_types, empty_types,
+                             js_module_types, js_call_types, js_import_types, js_import_types,
+                             js_branch_types, js_var_types,
+                             (const char *[]){"assignment_expression",
+                                              "augmented_assignment_expression", NULL},
+                             js_throw_types, NULL, ts_decorator_types, NULL, ts_env_members,
+                             tree_sitter_typescript, NULL},
 
     // CBM_LANG_TSX
     [CBM_LANG_TSX] =
@@ -1562,7 +1612,8 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     [CBM_LANG_JAVA] = {CBM_LANG_JAVA, java_func_types, java_class_types, java_field_types,
                        java_module_types, java_call_types, java_import_types, java_import_types,
                        java_branch_types, java_var_types, java_assign_types, java_throw_types,
-                       "throws", java_decorator_types, java_env_funcs, NULL, tree_sitter_java, NULL},
+                       "throws", java_decorator_types, java_env_funcs, NULL, tree_sitter_java,
+                       NULL},
 
     // CBM_LANG_CPP
     [CBM_LANG_CPP] = {CBM_LANG_CPP, cpp_func_types, cpp_class_types, cpp_field_types,
@@ -1592,7 +1643,7 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     [CBM_LANG_SCALA] = {CBM_LANG_SCALA, scala_func_types, scala_class_types, empty_types,
                         scala_module_types, scala_call_types, scala_import_types,
                         scala_import_types, scala_branch_types, scala_var_types, scala_assign_types,
-                        scala_throw_types, NULL, empty_types, scala_env_funcs, NULL,
+                        scala_throw_types, NULL, scala_decorator_types, scala_env_funcs, NULL,
                         tree_sitter_scala, NULL},
 
     // CBM_LANG_KOTLIN
@@ -1680,12 +1731,14 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     [CBM_LANG_ERLANG] = {CBM_LANG_ERLANG, erlang_func_types, erlang_class_types, empty_types,
                          erlang_module_types, erlang_call_types, erlang_import_types, empty_types,
                          erlang_branch_types, erlang_var_types, erlang_assign_types,
-                         erlang_throw_types, NULL, empty_types, NULL, NULL, tree_sitter_erlang, NULL},
+                         erlang_throw_types, NULL, empty_types, NULL, NULL, tree_sitter_erlang,
+                         NULL},
 
     // CBM_LANG_R
     [CBM_LANG_R] = {CBM_LANG_R, r_func_types, empty_types, empty_types, r_module_types,
                     r_call_types, r_import_types, empty_types, r_branch_types, r_var_types,
-                    r_var_types, empty_types, NULL, empty_types, r_env_funcs, NULL, tree_sitter_r, NULL},
+                    r_var_types, empty_types, NULL, empty_types, r_env_funcs, NULL, tree_sitter_r,
+                    NULL},
 
     // CBM_LANG_HTML
     [CBM_LANG_HTML] = {CBM_LANG_HTML, empty_types, empty_types, empty_types, html_module_types,
@@ -1696,7 +1749,8 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     // CBM_LANG_CSS
     [CBM_LANG_CSS] = {CBM_LANG_CSS, empty_types, empty_types, empty_types, css_module_types,
                       css_call_types, css_import_types, empty_types, empty_types, empty_types,
-                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_css, NULL},
+                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_css,
+                      NULL},
 
     // CBM_LANG_SCSS
     [CBM_LANG_SCSS] = {CBM_LANG_SCSS, scss_func_types, empty_types, empty_types, scss_module_types,
@@ -1707,17 +1761,20 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     // CBM_LANG_YAML
     [CBM_LANG_YAML] = {CBM_LANG_YAML, empty_types, empty_types, empty_types, yaml_module_types,
                        empty_types, empty_types, empty_types, empty_types, yaml_var_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_yaml, NULL},
+                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_yaml,
+                       NULL},
 
     // CBM_LANG_TOML
     [CBM_LANG_TOML] = {CBM_LANG_TOML, empty_types, toml_class_types, empty_types, toml_module_types,
                        empty_types, empty_types, empty_types, empty_types, toml_var_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_toml, NULL},
+                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_toml,
+                       NULL},
 
     // CBM_LANG_HCL
     [CBM_LANG_HCL] = {CBM_LANG_HCL, empty_types, hcl_class_types, empty_types, hcl_module_types,
                       hcl_call_types, empty_types, empty_types, empty_types, hcl_var_types,
-                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_hcl, NULL},
+                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_hcl,
+                      NULL},
 
     // CBM_LANG_SQL
     [CBM_LANG_SQL] = {CBM_LANG_SQL, sql_func_types, sql_class_types, sql_field_types,
@@ -1771,7 +1828,8 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     // CBM_LANG_ELM
     [CBM_LANG_ELM] = {CBM_LANG_ELM, elm_func_types, elm_class_types, empty_types, elm_module_types,
                       elm_call_types, elm_import_types, empty_types, elm_branch_types, empty_types,
-                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_elm, NULL},
+                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_elm,
+                      NULL},
 
     // CBM_LANG_FORTRAN
     [CBM_LANG_FORTRAN] = {CBM_LANG_FORTRAN, fortran_func_types, fortran_class_types, empty_types,
@@ -1808,7 +1866,8 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     // CBM_LANG_JSON
     [CBM_LANG_JSON] = {CBM_LANG_JSON, empty_types, empty_types, empty_types, json_module_types,
                        empty_types, empty_types, empty_types, empty_types, json_var_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_json, NULL},
+                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_json,
+                       NULL},
 
     // CBM_LANG_XML
     [CBM_LANG_XML] = {CBM_LANG_XML, empty_types, xml_class_types, empty_types, xml_module_types,
@@ -1828,7 +1887,7 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
                            NULL, empty_types, NULL, NULL, tree_sitter_make, NULL},
 
     // CBM_LANG_CMAKE
-    [CBM_LANG_CMAKE] = {CBM_LANG_CMAKE, make_func_types, empty_types, empty_types,
+    [CBM_LANG_CMAKE] = {CBM_LANG_CMAKE, cmake_func_types, empty_types, empty_types,
                         cmake_module_types, cmake_call_types, make_import_types, empty_types,
                         empty_types, empty_types, empty_types, empty_types, NULL, empty_types, NULL,
                         NULL, tree_sitter_cmake, NULL},
@@ -1867,13 +1926,14 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     // CBM_LANG_GLSL (reuses C node types)
     [CBM_LANG_GLSL] = {CBM_LANG_GLSL, c_func_types, c_class_types, c_field_types, c_module_types,
                        c_call_types, c_import_types, empty_types, c_branch_types, c_var_types,
-                       c_assign_types, empty_types, NULL, empty_types, NULL, NULL,
-                       tree_sitter_glsl, NULL},
+                       c_assign_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_glsl,
+                       NULL},
 
     // CBM_LANG_INI
     [CBM_LANG_INI] = {CBM_LANG_INI, empty_types, ini_class_types, empty_types, ini_module_types,
                       empty_types, empty_types, empty_types, empty_types, ini_var_types,
-                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_ini, NULL},
+                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_ini,
+                      NULL},
 
     // CBM_LANG_MATLAB
     [CBM_LANG_MATLAB] = {CBM_LANG_MATLAB, matlab_func_types, matlab_class_types, empty_types,
@@ -1925,6 +1985,26 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
                            gdscript_var_types, gdscript_assign_types, empty_types, NULL,
                            gdscript_decorator_types, NULL, NULL, tree_sitter_gdscript, NULL},
 
+    // CBM_LANG_QML
+    [CBM_LANG_QML] =
+        {CBM_LANG_QML, ts_func_types, qml_class_types, qml_field_types, js_module_types,
+         js_call_types, qml_import_types, qml_import_types, js_branch_types, js_var_types,
+         (const char *[]){"assignment_expression", "augmented_assignment_expression", NULL},
+         js_throw_types, NULL, ts_decorator_types, NULL, NULL, tree_sitter_qmljs, NULL},
+
+    // CBM_LANG_CFSCRIPT
+    [CBM_LANG_CFSCRIPT] =
+        {CBM_LANG_CFSCRIPT, cfscript_func_types, empty_types, cfscript_field_types, js_module_types,
+         js_call_types, cfscript_import_types, cfscript_import_types, js_branch_types, js_var_types,
+         (const char *[]){"assignment_expression", "augmented_assignment_expression", NULL},
+         js_throw_types, NULL, empty_types, NULL, NULL, tree_sitter_cfscript, NULL},
+
+    // CBM_LANG_CFML
+    [CBM_LANG_CFML] = {CBM_LANG_CFML, cfml_func_types, empty_types, empty_types, cfml_module_types,
+                       cfml_call_types, empty_types, empty_types, cfml_branch_types, empty_types,
+                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_cfml,
+                       NULL},
+
     // CBM_LANG_GLEAM
     [CBM_LANG_GLEAM] = {CBM_LANG_GLEAM, gleam_func_types, gleam_class_types, gleam_field_types,
                         gleam_module_types, gleam_call_types, gleam_import_types, empty_types,
@@ -1942,19 +2022,14 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     [CBM_LANG_PASCAL] = {CBM_LANG_PASCAL, pascal_func_types, pascal_class_types, pascal_field_types,
                          pascal_module_types, pascal_call_types, pascal_import_types, empty_types,
                          pascal_branch_types, pascal_var_types, pascal_assign_types,
-                         pascal_throw_types, NULL, empty_types, NULL, NULL, tree_sitter_pascal, NULL},
+                         pascal_throw_types, NULL, empty_types, NULL, NULL, tree_sitter_pascal,
+                         NULL},
 
     // CBM_LANG_DLANG
     [CBM_LANG_DLANG] = {CBM_LANG_DLANG, d_func_types, d_class_types, d_field_types, d_module_types,
                         d_call_types, d_import_types, empty_types, d_branch_types, d_var_types,
-                        d_assign_types, d_throw_types, NULL, empty_types, NULL, NULL,
-                        tree_sitter_d, NULL},
-
-    // CBM_LANG_NIM
-    [CBM_LANG_NIM] = {CBM_LANG_NIM, nim_func_types, nim_class_types, nim_field_types,
-                      nim_module_types, nim_call_types, nim_import_types, empty_types,
-                      nim_branch_types, nim_var_types, nim_assign_types, nim_throw_types, NULL,
-                      nim_decorator_types, NULL, NULL, tree_sitter_nim, NULL},
+                        d_assign_types, d_throw_types, NULL, empty_types, NULL, NULL, tree_sitter_d,
+                        NULL},
 
     // CBM_LANG_SCHEME
     [CBM_LANG_SCHEME] = {CBM_LANG_SCHEME, empty_types, empty_types, empty_types,
@@ -1971,24 +2046,26 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     // CBM_LANG_FISH
     [CBM_LANG_FISH] = {CBM_LANG_FISH, fish_func_types, empty_types, empty_types, fish_module_types,
                        fish_call_types, empty_types, empty_types, fish_branch_types, fish_var_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_fish, NULL},
+                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_fish,
+                       NULL},
 
     // CBM_LANG_AWK
     [CBM_LANG_AWK] = {CBM_LANG_AWK, awk_func_types, empty_types, empty_types, awk_module_types,
                       awk_call_types, empty_types, empty_types, awk_branch_types, awk_var_types,
-                      awk_assign_types, empty_types, NULL, empty_types, NULL, NULL,
-                      tree_sitter_awk, NULL},
+                      awk_assign_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_awk,
+                      NULL},
 
     // CBM_LANG_ZSH
     [CBM_LANG_ZSH] = {CBM_LANG_ZSH, zsh_func_types, empty_types, empty_types, zsh_module_types,
                       zsh_call_types, empty_types, empty_types, zsh_branch_types, zsh_var_types,
-                      zsh_assign_types, empty_types, NULL, empty_types, NULL, NULL,
-                      tree_sitter_zsh, NULL},
+                      zsh_assign_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_zsh,
+                      NULL},
 
     // CBM_LANG_TCL
     [CBM_LANG_TCL] = {CBM_LANG_TCL, tcl_func_types, tcl_class_types, empty_types, tcl_module_types,
                       tcl_call_types, empty_types, empty_types, tcl_branch_types, tcl_var_types,
-                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_tcl, NULL},
+                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_tcl,
+                      NULL},
 
     // CBM_LANG_ADA
     [CBM_LANG_ADA] = {CBM_LANG_ADA, ada_func_types, ada_class_types, ada_field_types,
@@ -2078,12 +2155,13 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
                        empty_types, NULL, NULL, tree_sitter_sway, NULL},
 
     // CBM_LANG_NASM
-    [CBM_LANG_NASM] = {CBM_LANG_NASM, empty_types, nasm_class_types, empty_types, nasm_module_types,
-                       nasm_call_types, nasm_import_types, empty_types, empty_types, nasm_var_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_nasm, NULL},
+    [CBM_LANG_NASM] = {CBM_LANG_NASM, nasm_func_types, nasm_class_types, empty_types,
+                       nasm_module_types, nasm_call_types, nasm_import_types, empty_types,
+                       empty_types, nasm_var_types, empty_types, empty_types, NULL, empty_types,
+                       NULL, NULL, tree_sitter_nasm, NULL},
 
     // CBM_LANG_ASSEMBLY
-    [CBM_LANG_ASSEMBLY] = {CBM_LANG_ASSEMBLY, empty_types, empty_types, empty_types,
+    [CBM_LANG_ASSEMBLY] = {CBM_LANG_ASSEMBLY, assembly_func_types, empty_types, empty_types,
                            assembly_module_types, empty_types, empty_types, empty_types,
                            empty_types, assembly_var_types, empty_types, empty_types, NULL,
                            empty_types, NULL, NULL, tree_sitter_asm, NULL},
@@ -2097,7 +2175,8 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     // CBM_LANG_BLADE
     [CBM_LANG_BLADE] = {CBM_LANG_BLADE, empty_types, empty_types, empty_types, blade_module_types,
                         empty_types, empty_types, empty_types, empty_types, empty_types,
-                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_blade, NULL},
+                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_blade,
+                        NULL},
 
     // CBM_LANG_JUST
     [CBM_LANG_JUST] = {CBM_LANG_JUST, just_func_types, empty_types, empty_types, just_module_types,
@@ -2150,7 +2229,8 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     // CBM_LANG_DIFF
     [CBM_LANG_DIFF] = {CBM_LANG_DIFF, empty_types, empty_types, empty_types, diff_module_types,
                        diff_call_types, empty_types, empty_types, empty_types, empty_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_diff, NULL},
+                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_diff,
+                       NULL},
 
     // CBM_LANG_WGSL
     [CBM_LANG_WGSL] = {CBM_LANG_WGSL, wgsl_func_types, wgsl_class_types, empty_types,
@@ -2166,7 +2246,8 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     // CBM_LANG_JSON5
     [CBM_LANG_JSON5] = {CBM_LANG_JSON5, empty_types, empty_types, empty_types, json5_module_types,
                         empty_types, empty_types, empty_types, empty_types, empty_types,
-                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_json5, NULL},
+                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_json5,
+                        NULL},
 
     // CBM_LANG_JSONNET
     [CBM_LANG_JSONNET] = {CBM_LANG_JSONNET, jsonnet_func_types, empty_types, empty_types,
@@ -2269,7 +2350,8 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     // CBM_LANG_GN
     [CBM_LANG_GN] = {CBM_LANG_GN, empty_types, empty_types, empty_types, gn_module_types,
                      gn_call_types, gn_import_types, empty_types, gn_branch_types, empty_types,
-                     gn_assign_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_gn, NULL},
+                     gn_assign_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_gn,
+                     NULL},
 
     // CBM_LANG_KCONFIG
     [CBM_LANG_KCONFIG] = {CBM_LANG_KCONFIG, empty_types, kconfig_class_types, empty_types,
@@ -2290,10 +2372,10 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
                         NULL, tree_sitter_smali, NULL},
 
     // CBM_LANG_TABLEGEN
-    [CBM_LANG_TABLEGEN] = {CBM_LANG_TABLEGEN, empty_types, empty_types, empty_types,
-                           tablegen_module_types, empty_types, tablegen_import_types, empty_types,
-                           empty_types, empty_types, empty_types, empty_types, NULL, empty_types,
-                           NULL, NULL, tree_sitter_tablegen, NULL},
+    [CBM_LANG_TABLEGEN] = {CBM_LANG_TABLEGEN, tablegen_func_types, tablegen_class_types,
+                           empty_types, tablegen_module_types, empty_types, tablegen_import_types,
+                           empty_types, empty_types, empty_types, empty_types, empty_types, NULL,
+                           empty_types, NULL, NULL, tree_sitter_tablegen, NULL},
 
     // CBM_LANG_ISPC
     [CBM_LANG_ISPC] = {CBM_LANG_ISPC, ispc_func_types, ispc_class_types, empty_types,
@@ -2308,10 +2390,10 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
                         empty_types, NULL, NULL, tree_sitter_cairo, NULL},
 
     // CBM_LANG_MOVE
-    [CBM_LANG_MOVE] = {CBM_LANG_MOVE, move_func_types, move_class_types, empty_types,
-                       move_module_types, move_call_types, move_import_types, empty_types,
-                       move_branch_types, move_var_types, move_assign_types, empty_types, NULL,
-                       empty_types, NULL, NULL, tree_sitter_move, NULL},
+    [CBM_LANG_MOVE] = {CBM_LANG_MOVE, move_func_types, empty_types, empty_types, move_module_types,
+                       move_call_types, move_import_types, empty_types, move_branch_types,
+                       move_var_types, move_assign_types, empty_types, NULL, empty_types, NULL,
+                       NULL, tree_sitter_move, NULL},
 
     // CBM_LANG_SQUIRREL
     [CBM_LANG_SQUIRREL] = {CBM_LANG_SQUIRREL, squirrel_func_types, squirrel_class_types,
@@ -2323,17 +2405,20 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     // CBM_LANG_FUNC
     [CBM_LANG_FUNC] = {CBM_LANG_FUNC, func_func_types, empty_types, empty_types, func_module_types,
                        func_call_types, func_import_types, empty_types, empty_types, empty_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_func, NULL},
+                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_func,
+                       NULL},
 
     // CBM_LANG_REGEX
     [CBM_LANG_REGEX] = {CBM_LANG_REGEX, empty_types, empty_types, empty_types, regex_module_types,
                         empty_types, empty_types, empty_types, empty_types, empty_types,
-                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_regex, NULL},
+                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_regex,
+                        NULL},
 
     // CBM_LANG_JSDOC
     [CBM_LANG_JSDOC] = {CBM_LANG_JSDOC, empty_types, empty_types, empty_types, jsdoc_module_types,
                         empty_types, empty_types, empty_types, empty_types, empty_types,
-                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_jsdoc, NULL},
+                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_jsdoc,
+                        NULL},
 
     // CBM_LANG_RST
     [CBM_LANG_RST] = {CBM_LANG_RST, empty_types, empty_types, empty_types, rst_module_types,
@@ -2408,12 +2493,14 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     // CBM_LANG_PKL
     [CBM_LANG_PKL] = {CBM_LANG_PKL, pkl_func_types, pkl_class_types, empty_types, pkl_module_types,
                       empty_types, pkl_import_types, empty_types, empty_types, pkl_var_types,
-                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_pkl, NULL},
+                      empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_pkl,
+                      NULL},
 
     // CBM_LANG_GOMOD
     [CBM_LANG_GOMOD] = {CBM_LANG_GOMOD, empty_types, empty_types, empty_types, gomod_module_types,
                         empty_types, gomod_import_types, empty_types, empty_types, gomod_var_types,
-                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_gomod, NULL},
+                        empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_gomod,
+                        NULL},
 
     // CBM_LANG_APEX
     [CBM_LANG_APEX] = {CBM_LANG_APEX, apex_func_types, apex_class_types, apex_field_types,
@@ -2424,12 +2511,14 @@ static const CBMLangSpec lang_specs[CBM_LANG_COUNT] = {
     // CBM_LANG_SOQL
     [CBM_LANG_SOQL] = {CBM_LANG_SOQL, empty_types, empty_types, empty_types, soql_module_types,
                        empty_types, soql_import_types, empty_types, empty_types, empty_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_soql, NULL},
+                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_soql,
+                       NULL},
 
     // CBM_LANG_SOSL
     [CBM_LANG_SOSL] = {CBM_LANG_SOSL, empty_types, empty_types, empty_types, sosl_module_types,
                        empty_types, sosl_import_types, empty_types, empty_types, empty_types,
-                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_sosl, NULL},
+                       empty_types, empty_types, NULL, empty_types, NULL, NULL, tree_sitter_sosl,
+                       NULL},
 
     // CBM_LANG_KUSTOMIZE — reuses YAML grammar; semantic extraction via cbm_extract_k8s()
     [CBM_LANG_KUSTOMIZE] = {CBM_LANG_KUSTOMIZE, yaml_var_types, empty_types, empty_types,

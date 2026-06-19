@@ -83,6 +83,9 @@ static const ext_entry_t EXT_TABLE[] = {
     {".ex", CBM_LANG_ELIXIR},
     {".exs", CBM_LANG_ELIXIR},
 
+    /* DotEnv */
+    {".env", CBM_LANG_DOTENV},
+
     /* Elm */
     {".elm", CBM_LANG_ELM},
 
@@ -145,6 +148,8 @@ static const ext_entry_t EXT_TABLE[] = {
     /* JavaScript */
     {".js", CBM_LANG_JAVASCRIPT},
     {".jsx", CBM_LANG_JAVASCRIPT},
+    {".mjs", CBM_LANG_JAVASCRIPT}, /* ES modules (#197) */
+    {".cjs", CBM_LANG_JAVASCRIPT}, /* CommonJS modules */
 
     /* JSON */
     {".json", CBM_LANG_JSON},
@@ -241,6 +246,8 @@ static const ext_entry_t EXT_TABLE[] = {
 
     /* TypeScript */
     {".ts", CBM_LANG_TYPESCRIPT},
+    {".mts", CBM_LANG_TYPESCRIPT}, /* TS ES modules */
+    {".cts", CBM_LANG_TYPESCRIPT}, /* TS CommonJS modules */
 
     /* VimScript */
     {".vim", CBM_LANG_VIMSCRIPT},
@@ -248,6 +255,7 @@ static const ext_entry_t EXT_TABLE[] = {
     {"justfile", CBM_LANG_JUST},
     {"Justfile", CBM_LANG_JUST},
     {".justfile", CBM_LANG_JUST},
+    {".just", CBM_LANG_JUST}, /* `import 'common.just'` target files */
     {"hyprland.conf", CBM_LANG_HYPRLANG},
     {"ssh_config", CBM_LANG_SSHCONFIG},
     {"sshd_config", CBM_LANG_SSHCONFIG},
@@ -255,6 +263,9 @@ static const ext_entry_t EXT_TABLE[] = {
     {"BUILD.bazel", CBM_LANG_STARLARK},
     {"WORKSPACE", CBM_LANG_STARLARK},
     {"WORKSPACE.bazel", CBM_LANG_STARLARK},
+
+    /* BitBake include fragments — `require/include foo.inc` target files. */
+    {".inc", CBM_LANG_BITBAKE},
 
     /* Vue */
     {".vue", CBM_LANG_VUE},
@@ -368,6 +379,7 @@ static const ext_entry_t EXT_TABLE[] = {
 
     /* Go Template */
     {".gotmpl", CBM_LANG_GOTEMPLATE},
+    {".tpl", CBM_LANG_GOTEMPLATE}, /* Helm _helpers.tpl named-template definitions */
 
     /* Hare */
     {".ha", CBM_LANG_HARE},
@@ -426,6 +438,13 @@ static const ext_entry_t EXT_TABLE[] = {
     /* Luau */
     {".luau", CBM_LANG_LUAU},
 
+    /* Qt QML */
+    {".qml", CBM_LANG_QML},
+
+    /* CFML / ColdFusion — .cfc components are script-dialect; .cfm are tag templates */
+    {".cfc", CBM_LANG_CFSCRIPT},
+    {".cfm", CBM_LANG_CFML},
+
     /* Mermaid */
     {".mermaid", CBM_LANG_MERMAID},
 
@@ -442,10 +461,8 @@ static const ext_entry_t EXT_TABLE[] = {
     {".ncl", CBM_LANG_NICKEL},
 
     /* Nim */
-    {".nim", CBM_LANG_NIM},
 
     /* Nim */
-    {".nims", CBM_LANG_NIM},
 
     /* Squirrel */
     {".nut", CBM_LANG_SQUIRREL},
@@ -503,6 +520,9 @@ static const ext_entry_t EXT_TABLE[] = {
 
     /* ReScript */
     {".resi", CBM_LANG_RESCRIPT},
+
+    /* Regex */
+    {".re", CBM_LANG_REGEX},
 
     /* Racket */
     {".rkt", CBM_LANG_RACKET},
@@ -644,6 +664,9 @@ static const filename_entry_t FILENAME_TABLE[] = {
     {"requirements-test.txt", CBM_LANG_REQUIREMENTS},
     {"Kconfig", CBM_LANG_KCONFIG},
     {"go.mod", CBM_LANG_GOMOD},
+    {".env", CBM_LANG_DOTENV},
+    {".env.local", CBM_LANG_DOTENV},
+    {".gitattributes", CBM_LANG_GITATTRIBUTES},
 
 };
 
@@ -745,6 +768,9 @@ static const char *LANG_NAMES[CBM_LANG_COUNT] = {
     [CBM_LANG_HARE] = "Hare",
     [CBM_LANG_PONY] = "Pony",
     [CBM_LANG_LUAU] = "Luau",
+    [CBM_LANG_QML] = "QML",
+    [CBM_LANG_CFSCRIPT] = "CFML",
+    [CBM_LANG_CFML] = "CFML",
     [CBM_LANG_JANET] = "Janet",
     [CBM_LANG_SWAY] = "Sway",
     [CBM_LANG_NASM] = "NASM",
@@ -847,6 +873,15 @@ CBMLanguage cbm_language_for_filename(const char *filename) {
         }
     }
 
+    /* DotEnv variant filenames (".env.local", ".env.production", …): the
+     * filename starts with ".env." but its last "extension" (e.g. ".local")
+     * is not a real language extension.  Match the dotenv convention used by
+     * pass_envscan/pass_infrascan (".env" exact, ".env." prefix, "*.env"
+     * suffix) so file-index routing agrees with direct extraction. */
+    if (strncmp(filename, ".env.", SLEN(".env.")) == 0) {
+        return CBM_LANG_DOTENV;
+    }
+
     /* Fall back to extension-based lookup.
      * For compound extensions (e.g. ".blade.php") defined in the user config,
      * scan from the first dot in the basename toward the last, checking user
@@ -856,17 +891,31 @@ CBMLanguage cbm_language_for_filename(const char *filename) {
         return CBM_LANG_COUNT;
     }
 
-    /* Probe user config for compound extensions (e.g. ".blade.php"). */
+    /* Probe compound extensions (e.g. ".blade.php") from the first dot toward
+     * the last. Built-in compounds are checked first so e.g. Laravel Blade
+     * templates map to Blade rather than the single-extension fallback (PHP);
+     * user config can still add more (#258). */
+    static const struct {
+        const char *ext;
+        CBMLanguage lang;
+    } COMPOUND_EXT_TABLE[] = {
+        {".blade.php", CBM_LANG_BLADE},
+    };
     const cbm_userconfig_t *ucfg = cbm_get_user_lang_config();
-    if (ucfg) {
-        const char *p = strchr(filename, '.');
-        while (p && p < last_dot) {
+    const char *p = strchr(filename, '.');
+    while (p && p < last_dot) {
+        for (size_t i = 0; i < sizeof(COMPOUND_EXT_TABLE) / sizeof(COMPOUND_EXT_TABLE[0]); i++) {
+            if (strcmp(p, COMPOUND_EXT_TABLE[i].ext) == 0) {
+                return COMPOUND_EXT_TABLE[i].lang;
+            }
+        }
+        if (ucfg) {
             CBMLanguage lang = cbm_userconfig_lookup(ucfg, p);
             if (lang != CBM_LANG_COUNT) {
                 return lang;
             }
-            p = strchr(p + SKIP_ONE, '.');
         }
+        p = strchr(p + SKIP_ONE, '.');
     }
 
     /* Standard single-extension lookup (built-ins + user overrides). */
