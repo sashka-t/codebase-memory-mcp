@@ -86,6 +86,7 @@ struct cbm_gbuf {
     /* Secondary node indexes */
     CBMHashTable *nodes_by_label; /* key: label, value: (node_ptr_array_t*) */
     CBMHashTable *nodes_by_name;  /* key: name, value: (node_ptr_array_t*) */
+    CBMHashTable *nodes_by_file;  /* key: file_path, value: (node_ptr_array_t*) */
 
     /* Edge storage: array of pointers to individually heap-allocated edges */
     CBM_DYN_ARRAY(cbm_gbuf_edge_t *) edges;
@@ -360,6 +361,10 @@ static void register_node_in_indexes(cbm_gbuf_t *gb, cbm_gbuf_node_t *node) {
     node_ptr_array_t *by_name =
         get_or_create_node_array(gb->nodes_by_name, node->name ? node->name : "");
     cbm_da_push(by_name, (const cbm_gbuf_node_t *)node);
+
+    node_ptr_array_t *by_file =
+        get_or_create_node_array(gb->nodes_by_file, node->file_path ? node->file_path : "");
+    cbm_da_push(by_file, (const cbm_gbuf_node_t *)node);
 }
 
 /* Push an edge pointer into a dynamic array (wraps macro to reduce CC contribution). */
@@ -417,6 +422,9 @@ static void release_gbuf_indexes(cbm_gbuf_t *gb) {
     cbm_ht_foreach(gb->nodes_by_name, free_node_array, NULL);
     cbm_ht_free(gb->nodes_by_name);
     gb->nodes_by_name = NULL;
+    cbm_ht_foreach(gb->nodes_by_file, free_node_array, NULL);
+    cbm_ht_free(gb->nodes_by_file);
+    gb->nodes_by_file = NULL;
     cbm_ht_foreach(gb->edge_by_key, free_key_only, NULL);
     cbm_ht_free(gb->edge_by_key);
     gb->edge_by_key = NULL;
@@ -449,6 +457,7 @@ cbm_gbuf_t *cbm_gbuf_new(const char *project, const char *root_path) {
     gb->by_id_cap = 0;
     gb->nodes_by_label = cbm_ht_create(CBM_SZ_32);
     gb->nodes_by_name = cbm_ht_create(CBM_SZ_256);
+    gb->nodes_by_file = cbm_ht_create(CBM_SZ_256);
 
     gb->edge_by_key = cbm_ht_create(CBM_SZ_512);
     gb->edges_by_source_type = cbm_ht_create(CBM_SZ_256);
@@ -502,6 +511,10 @@ void cbm_gbuf_free(cbm_gbuf_t *gb) {
     if (gb->nodes_by_name) {
         cbm_ht_foreach(gb->nodes_by_name, free_node_array, NULL);
         cbm_ht_free(gb->nodes_by_name);
+    }
+    if (gb->nodes_by_file) {
+        cbm_ht_foreach(gb->nodes_by_file, free_node_array, NULL);
+        cbm_ht_free(gb->nodes_by_file);
     }
     if (gb->edge_by_key) {
         cbm_ht_foreach(gb->edge_by_key, free_key_only, NULL);
@@ -826,11 +839,14 @@ int cbm_gbuf_delete_by_label(cbm_gbuf_t *gb, const char *label) {
     /* Build hash set of deleted node IDs for O(1) lookup */
     CBMHashTable *deleted_set = cbm_ht_create(arr->count);
     for (int i = 0; i < arr->count; i++) {
-        const cbm_gbuf_node_t *n = arr->items[i];
+        cbm_gbuf_node_t *n = (cbm_gbuf_node_t *)arr->items[i];
 
         char id_buf[CBM_SZ_32];
         make_id_key(id_buf, sizeof(id_buf), n->id);
         cbm_ht_set(deleted_set, strdup(id_buf), intptr_to_ptr(SKIP_ONE));
+
+        remove_node_from_ptr_array(cbm_ht_get(gb->nodes_by_name, n->name), n->id);
+        remove_node_from_ptr_array(cbm_ht_get(gb->nodes_by_file, n->file_path), n->id);
 
         /* Remove from primary indexes */
         cbm_ht_delete(gb->node_by_qn, n->qualified_name);
@@ -850,22 +866,20 @@ int cbm_gbuf_delete_by_label(cbm_gbuf_t *gb, const char *label) {
     return 0;
 }
 
-int cbm_gbuf_delete_by_file(cbm_gbuf_t *gb, const char *file_path) {
-    if (!gb || !file_path) {
-        return CBM_NOT_FOUND;
+static int collect_deleted_nodes_by_file(cbm_gbuf_t *gb, const char *file_path,
+                                         CBMHashTable *deleted_set, int *candidate_count) {
+    node_ptr_array_t *arr = cbm_ht_get(gb->nodes_by_file, file_path);
+    if (!arr || arr->count == 0) {
+        return 0;
     }
 
-    /* Collect IDs of nodes in this file */
-    CBMHashTable *deleted_set = cbm_ht_create(CBM_SZ_64);
     int deleted_count = 0;
-    int scanned = 0;
+    if (candidate_count) {
+        *candidate_count += arr->count;
+    }
 
-    for (int i = 0; i < gb->nodes.count; i++) {
-        cbm_gbuf_node_t *n = gb->nodes.items[i];
-        scanned++;
-        if (!n->file_path || strcmp(n->file_path, file_path) != 0) {
-            continue;
-        }
+    for (int i = 0; i < arr->count; i++) {
+        cbm_gbuf_node_t *n = (cbm_gbuf_node_t *)arr->items[i];
         if (!n->qualified_name || !cbm_ht_get(gb->node_by_qn, n->qualified_name)) {
             continue;
         }
@@ -890,6 +904,20 @@ int cbm_gbuf_delete_by_file(cbm_gbuf_t *gb, const char *file_path) {
         n->qualified_name = NULL;
         deleted_count++;
     }
+    cbm_da_clear(arr);
+
+    return deleted_count;
+}
+
+int cbm_gbuf_delete_by_file(cbm_gbuf_t *gb, const char *file_path) {
+    if (!gb || !file_path) {
+        return CBM_NOT_FOUND;
+    }
+
+    /* Collect IDs of live nodes in this file. */
+    CBMHashTable *deleted_set = cbm_ht_create(CBM_SZ_64);
+    int candidate_count = 0;
+    int deleted_count = collect_deleted_nodes_by_file(gb, file_path, deleted_set, &candidate_count);
 
     if (deleted_count == 0) {
         cbm_ht_free(deleted_set);
@@ -904,9 +932,54 @@ int cbm_gbuf_delete_by_file(cbm_gbuf_t *gb, const char *file_path) {
     {
         char s_buf[CBM_SZ_16];
         char d_buf[CBM_SZ_16];
-        snprintf(s_buf, sizeof(s_buf), "%d", scanned);
+        snprintf(s_buf, sizeof(s_buf), "%d", candidate_count);
         snprintf(d_buf, sizeof(d_buf), "%d", deleted_count);
-        cbm_log_info("gbuf.delete_by_file", "file", file_path, "scanned", s_buf, "deleted", d_buf);
+        cbm_log_info("gbuf.delete_by_file", "file", file_path, "candidates", s_buf, "deleted",
+                     d_buf);
+    }
+    return deleted_count;
+}
+
+int cbm_gbuf_delete_by_files(cbm_gbuf_t *gb, const char **file_paths, int file_count) {
+    if (!gb || !file_paths || file_count < 0) {
+        return CBM_NOT_FOUND;
+    }
+
+    CBMHashTable *deleted_set = cbm_ht_create(CBM_SZ_256);
+    int candidate_count = 0;
+    int deleted_count = 0;
+    int files_with_nodes = 0;
+
+    for (int i = 0; i < file_count; i++) {
+        const char *file_path = file_paths[i];
+        if (!file_path) {
+            continue;
+        }
+        int before = candidate_count;
+        deleted_count += collect_deleted_nodes_by_file(gb, file_path, deleted_set, &candidate_count);
+        if (candidate_count > before) {
+            files_with_nodes++;
+        }
+    }
+
+    if (deleted_count == 0) {
+        cbm_ht_free(deleted_set);
+        return 0;
+    }
+
+    cascade_delete_edges(gb, deleted_set);
+
+    cbm_ht_foreach(deleted_set, free_key_only, NULL);
+    cbm_ht_free(deleted_set);
+    {
+        char f_buf[CBM_SZ_16];
+        char c_buf[CBM_SZ_16];
+        char d_buf[CBM_SZ_16];
+        snprintf(f_buf, sizeof(f_buf), "%d", files_with_nodes);
+        snprintf(c_buf, sizeof(c_buf), "%d", candidate_count);
+        snprintf(d_buf, sizeof(d_buf), "%d", deleted_count);
+        cbm_log_info("gbuf.delete_by_files", "files", f_buf, "candidates", c_buf, "deleted",
+                     d_buf);
     }
     return deleted_count;
 }
@@ -1267,6 +1340,8 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
         *val = existing->id;
         cbm_ht_set(*remap, strdup(key), val);
     }
+
+    register_node_in_indexes(dst, existing);
 }
 
 /* Copy a non-colliding src node into dst with its original ID. */

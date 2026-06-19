@@ -524,6 +524,8 @@ Project config overrides global for conflicting extensions. An entry whose langu
 
 SQLite databases stored at `~/.cache/codebase-memory-mcp/`. Persists across restarts (WAL mode, ACID-safe). To reset: `rm -rf ~/.cache/codebase-memory-mcp/`.
 
+Incremental refreshes load the existing graph, batch-purge nodes for changed/deleted files, cascade-delete affected edges once, then re-extract only the changed files. This keeps large repositories responsive when thousands of files need refreshing.
+
 ## Troubleshooting
 
 | Problem | Fix |

@@ -313,7 +313,9 @@ typedef struct {
 
 static const tool_def_t TOOLS[] = {
     {"index_repository", "Index repository",
-     "Index a repository into the knowledge graph. "
+     "Index a repository into the knowledge graph. First run builds a full project index; "
+     "subsequent runs are incremental and batch-purge changed/deleted files before "
+     "re-extraction, avoiding repeated graph scans on large repos. "
      "Special mode 'cross-repo-intelligence': skip extraction, only match Routes/Channels "
      "across projects to create CROSS_HTTP_CALLS/CROSS_ASYNC_CALLS/CROSS_CHANNEL edges. "
      "Requires target_projects param. Ensure target projects have fresh indexes first. "
@@ -332,7 +334,9 @@ static const tool_def_t TOOLS[] = {
      "\"default\":\"full\",\"description\":\"All modes run type-aware LSP call/usage "
      "resolution (per-file + cross-file). full: all files + similarity/semantic edges. "
      "moderate: filtered files + similarity/semantic. fast: filtered files, no "
-     "similarity/semantic. cross-repo-intelligence: match Routes/Channels across projects.\"},"
+     "similarity/semantic. Normal full/moderate/fast runs reuse the existing DB when possible "
+     "and incrementally refresh changed/deleted files. cross-repo-intelligence: match "
+     "Routes/Channels across projects.\"},"
      "\"target_projects\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},"
      "\"description\":\"Projects to search for cross-repo links (cross-repo-intelligence mode). "
      "Use [\\\"*\\\"] for all indexed projects. Run list_projects to see available projects.\"},"

@@ -576,6 +576,48 @@ TEST(gbuf_delete_by_label_cascades_edges) {
     PASS();
 }
 
+TEST(gbuf_delete_by_file_uses_updated_file_index) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+    cbm_gbuf_upsert_node(gb, "Function", "moved", "pkg.moved", "old.go", 1, 5, "{}");
+    cbm_gbuf_upsert_node(gb, "Function", "moved", "pkg.moved", "new.go", 10, 15, "{}");
+    cbm_gbuf_upsert_node(gb, "Function", "old", "pkg.old", "old.go", 20, 25, "{}");
+
+    int deleted = cbm_gbuf_delete_by_file(gb, "old.go");
+    ASSERT_EQ(deleted, 1);
+    ASSERT_EQ(cbm_gbuf_node_count(gb), 1);
+    ASSERT_NOT_NULL(cbm_gbuf_find_by_qn(gb, "pkg.moved"));
+    ASSERT_NULL(cbm_gbuf_find_by_qn(gb, "pkg.old"));
+
+    deleted = cbm_gbuf_delete_by_file(gb, "old.go");
+    ASSERT_EQ(deleted, 0);
+    ASSERT_EQ(cbm_gbuf_node_count(gb), 1);
+
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+TEST(gbuf_delete_by_files_cascades_once_for_batch) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
+    int64_t a = cbm_gbuf_upsert_node(gb, "Function", "a", "pkg.a", "a.go", 1, 5, "{}");
+    int64_t b = cbm_gbuf_upsert_node(gb, "Function", "b", "pkg.b", "b.go", 1, 5, "{}");
+    int64_t c = cbm_gbuf_upsert_node(gb, "Function", "c", "pkg.c", "c.go", 1, 5, "{}");
+    cbm_gbuf_insert_edge(gb, a, b, "CALLS", "{}");
+    cbm_gbuf_insert_edge(gb, b, c, "CALLS", "{}");
+    cbm_gbuf_insert_edge(gb, c, c, "CALLS", "{}");
+
+    const char *files[] = {"a.go", "b.go"};
+    int deleted = cbm_gbuf_delete_by_files(gb, files, 2);
+    ASSERT_EQ(deleted, 2);
+    ASSERT_EQ(cbm_gbuf_node_count(gb), 1);
+    ASSERT_EQ(cbm_gbuf_edge_count(gb), 1);
+    ASSERT_NULL(cbm_gbuf_find_by_qn(gb, "pkg.a"));
+    ASSERT_NULL(cbm_gbuf_find_by_qn(gb, "pkg.b"));
+    ASSERT_NOT_NULL(cbm_gbuf_find_by_qn(gb, "pkg.c"));
+
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
 TEST(gbuf_node_count_empty) {
     cbm_gbuf_t *gb = cbm_gbuf_new("test", "/tmp");
     ASSERT_EQ(cbm_gbuf_node_count(gb), 0);
@@ -1043,6 +1085,8 @@ SUITE(graph_buffer) {
     RUN_TEST(gbuf_find_by_label_no_matches);
     RUN_TEST(gbuf_find_by_name_multiple);
     RUN_TEST(gbuf_delete_by_label_cascades_edges);
+    RUN_TEST(gbuf_delete_by_file_uses_updated_file_index);
+    RUN_TEST(gbuf_delete_by_files_cascades_once_for_batch);
     RUN_TEST(gbuf_node_count_empty);
     RUN_TEST(gbuf_upsert_100_nodes_stress);
 

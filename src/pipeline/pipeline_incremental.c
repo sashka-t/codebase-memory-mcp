@@ -804,11 +804,26 @@ int cbm_pipeline_run_incremental(cbm_pipeline_t *p, const char *db_path, cbm_fil
 
     /* Step 2: Purge stale nodes */
     cbm_clock_gettime(CLOCK_MONOTONIC, &t);
-    for (int i = 0; i < ci; i++) {
-        cbm_gbuf_delete_by_file(existing, changed_files[i].rel_path);
+    int purge_count = ci + deleted_count;
+    const char **purge_paths = purge_count > 0 ? calloc((size_t)purge_count, sizeof(char *)) : NULL;
+    if (purge_paths) {
+        for (int i = 0; i < ci; i++) {
+            purge_paths[i] = changed_files[i].rel_path;
+        }
+        for (int i = 0; i < deleted_count; i++) {
+            purge_paths[ci + i] = deleted[i];
+        }
+        cbm_gbuf_delete_by_files(existing, purge_paths, purge_count);
+        free(purge_paths);
+    } else {
+        for (int i = 0; i < ci; i++) {
+            cbm_gbuf_delete_by_file(existing, changed_files[i].rel_path);
+        }
+        for (int i = 0; i < deleted_count; i++) {
+            cbm_gbuf_delete_by_file(existing, deleted[i]);
+        }
     }
     for (int i = 0; i < deleted_count; i++) {
-        cbm_gbuf_delete_by_file(existing, deleted[i]);
         free(deleted[i]);
     }
     free(deleted);
