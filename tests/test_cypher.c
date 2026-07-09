@@ -7,8 +7,13 @@
 #include "test_framework.h"
 #include <cypher/cypher.h>
 #include <store/store.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#ifndef _WIN32
+#include <sys/wait.h> /* fork/waitpid crash-isolation for the projection-width guard */
+#include <unistd.h>
+#endif
 
 /* ══════════════════════════════════════════════════════════════════
  *  LEXER TESTS
@@ -828,6 +833,73 @@ TEST(cypher_exec_variable_length) {
     ASSERT_EQ(rc, 0);
     /* Should find: ValidateOrder (1 hop), SubmitOrder (2 hops), LogError (1 hop) */
     ASSERT_GTE(r.row_count, 3);
+
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
+/* Reproduce-first (#887): an EXPLICIT variable-length upper bound must still be
+ * capped at the engine ceiling (cbm_cypher_max_depth(), default 10). On
+ * origin/main, expand_var_length honoured an explicit `*1..N` verbatim (only the
+ * unbounded `*` / `*..m` forms were capped), so `[:CALLS*1..N]` passed N straight
+ * to cbm_store_bfs — an unbounded traversal (a DoS on cyclic graphs). RED before
+ * the clamp: a *1..12 walk over a 13-node chain
+ * returns all 12 hops (N01..N12). GREEN after: it stops at the depth-10 ceiling
+ * (N01..N10); N11/N12 are never emitted. max_rows=64 keeps the binding-expansion
+ * cap (bind_cap*10) well above the hop count, so DEPTH — not the binding cap — is
+ * the bound under test. */
+TEST(cypher_exec_var_length_explicit_bound_capped) {
+    cbm_store_t *s = cbm_store_open_memory();
+    cbm_store_upsert_project(s, "test", "/tmp/test");
+
+    /* Linear chain N00 -CALLS-> N01 -> ... -> N12 (13 nodes, one node per hop). */
+    int64_t ids[13];
+    for (int i = 0; i < 13; i++) {
+        char name[8];
+        char qn[24];
+        snprintf(name, sizeof(name), "N%02d", i);
+        snprintf(qn, sizeof(qn), "test.N%02d", i);
+        cbm_node_t n = {.project = "test",
+                        .label = "Function",
+                        .name = name,
+                        .qualified_name = qn,
+                        .file_path = "chain.go"};
+        ids[i] = cbm_store_upsert_node(s, &n);
+    }
+    for (int i = 0; i < 12; i++) {
+        cbm_edge_t e = {
+            .project = "test", .source_id = ids[i], .target_id = ids[i + 1], .type = "CALLS"};
+        cbm_store_insert_edge(s, &e);
+    }
+
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (a:Function {name: \"N00\"})-[:CALLS*1..12]->"
+                                "(x:Function) RETURN x.name",
+                                "test", 64, &r);
+    ASSERT_EQ(rc, 0);
+
+    /* Capped at 10 hops → exactly N01..N10; N11/N12 are beyond the ceiling. */
+    ASSERT_EQ(r.row_count, 10);
+    bool saw_n10 = false;
+    bool saw_n11 = false;
+    bool saw_n12 = false;
+    for (int i = 0; i < r.row_count; i++) {
+        const char *v = r.rows[i][0];
+        if (v && strcmp(v, "N10") == 0) {
+            saw_n10 = true;
+        }
+        if (v && strcmp(v, "N11") == 0) {
+            saw_n11 = true;
+        }
+        if (v && strcmp(v, "N12") == 0) {
+            saw_n12 = true;
+        }
+    }
+    ASSERT_TRUE(saw_n10);  /* within the ceiling — proves the traversal really ran */
+    ASSERT_FALSE(saw_n11); /* clamped away */
+    ASSERT_FALSE(saw_n12);
 
     cbm_cypher_result_free(&r);
     cbm_store_close(s);
@@ -2183,6 +2255,27 @@ TEST(cypher_exec_with_count) {
     PASS();
 }
 
+/* Regression: a bare node group-var carried through WITH aggregation must project
+ * its real properties (not blank). Pre-fix, the carried var held only the node
+ * name, so RETURN g.file_path returned "". */
+TEST(cypher_exec_with_node_groupvar_prop) {
+    cbm_store_t *s = setup_cypher_store();
+    cbm_cypher_result_t r = {0};
+    int rc = cbm_cypher_execute(s,
+                                "MATCH (f:Function)-[:CALLS]->(g:Function) "
+                                "WHERE g.name = \"ValidateOrder\" "
+                                "WITH g, COUNT(*) AS c "
+                                "RETURN g.file_path, g.name, c",
+                                "test", 0, &r);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(r.row_count, 1);
+    ASSERT_STR_EQ(r.rows[0][0], "validate.go"); /* was "" before the fix */
+    ASSERT_STR_EQ(r.rows[0][1], "ValidateOrder");
+    cbm_cypher_result_free(&r);
+    cbm_store_close(s);
+    PASS();
+}
+
 TEST(cypher_exec_with_where) {
     cbm_store_t *s = setup_cypher_store();
     cbm_cypher_result_t r = {0};
@@ -2489,15 +2582,56 @@ TEST(cypher_multi_prop_projection_no_alias) {
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(r.row_count, 1);
     ASSERT_EQ(r.col_count, 6);
-    ASSERT_STR_EQ(r.rows[0][0], "1"); /* loop_depth — NOT the suffix transitive_loop_depth */
-    ASSERT_STR_EQ(r.rows[0][1], "5"); /* transitive_loop_depth */
-    ASSERT_STR_EQ(r.rows[0][2], "7"); /* cognitive */
-    ASSERT_STR_EQ(r.rows[0][3], "3"); /* complexity */
+    ASSERT_STR_EQ(r.rows[0][0], "1");  /* loop_depth — NOT the suffix transitive_loop_depth */
+    ASSERT_STR_EQ(r.rows[0][1], "5");  /* transitive_loop_depth */
+    ASSERT_STR_EQ(r.rows[0][2], "7");  /* cognitive */
+    ASSERT_STR_EQ(r.rows[0][3], "3");  /* complexity */
     ASSERT_STR_EQ(r.rows[0][4], "10"); /* start_line (computed) */
     ASSERT_STR_EQ(r.rows[0][5], "42"); /* end_line (computed) — distinct from start_line */
     cbm_cypher_result_free(&r);
     cbm_store_close(s);
     PASS();
+}
+
+/* Result projection writes into fixed-width per-row stack arrays
+ * (vals[CBM_SZ_32] / func_bufs[CBM_SZ_32][…] in execute_return_simple and its
+ * siblings), indexed by the parsed RETURN item count. The parser must bound
+ * that count to the array width; an over-wide RETURN has to be rejected, not
+ * allowed to run and write past the arrays. Drive a >32-column RETURN in a
+ * forked child so a stack overwrite (ASan abort, or a raw segfault) shows up
+ * as a killing signal instead of taking down the whole runner; the bounded
+ * path returns an ordinary error and the child exits cleanly. */
+TEST(cypher_wide_return_projection_bounded) {
+#ifdef _WIN32
+    SKIP_PLATFORM("fork crash-isolation is POSIX-only; the parse-time bound is platform-agnostic");
+#else
+    char query[4096];
+    int off = snprintf(query, sizeof(query), "MATCH (f:Function) RETURN ");
+    for (int i = 0; i < 48; i++) { /* 48 > CBM_SZ_32 (32) fixed columns */
+        off += snprintf(query + off, sizeof(query) - (size_t)off, "%sf.p%d", i ? ", " : "", i);
+    }
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        cbm_store_t *s = setup_cypher_store();
+        cbm_cypher_result_t r = {0};
+        (void)cbm_cypher_execute(s, query, "test", 0, &r);
+        cbm_cypher_result_free(&r);
+        cbm_store_close(s);
+        _exit(0); /* reached only when execution did NOT overflow */
+    }
+    ASSERT_TRUE(pid > 0);
+    int status = 0;
+    (void)waitpid(pid, &status, 0);
+    if (WIFSIGNALED(status)) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "wide RETURN killed by signal %d — projection stack overflow",
+                 WTERMSIG(status));
+        FAIL(msg);
+    }
+    ASSERT_TRUE(WIFEXITED(status));
+    PASS();
+#endif
 }
 
 /* ══════════════════════════════════════════════════════════════════ */
@@ -2560,6 +2694,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_exec_limit);
     RUN_TEST(cypher_exec_order_by);
     RUN_TEST(cypher_exec_variable_length);
+    RUN_TEST(cypher_exec_var_length_explicit_bound_capped);
     RUN_TEST(cypher_exec_defines_edge);
     RUN_TEST(cypher_exec_no_results);
     RUN_TEST(cypher_exec_where_numeric);
@@ -2642,6 +2777,7 @@ SUITE(cypher) {
     /* Phase 6: WITH clause */
     RUN_TEST(cypher_exec_with_rename);
     RUN_TEST(cypher_exec_with_count);
+    RUN_TEST(cypher_exec_with_node_groupvar_prop);
     RUN_TEST(cypher_exec_with_where);
     RUN_TEST(cypher_exec_with_orderby_limit);
     RUN_TEST(cypher_parse_with);
@@ -2659,4 +2795,5 @@ SUITE(cypher) {
     /* Phase 9: UNWIND */
     RUN_TEST(cypher_parse_unwind);
     RUN_TEST(cypher_parse_unwind_var);
+    RUN_TEST(cypher_wide_return_projection_bounded);
 }
