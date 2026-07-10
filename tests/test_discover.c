@@ -153,6 +153,18 @@ TEST(skip_fast_e2e) {
     PASS();
 }
 
+/* `out` is a common source-package name (e.g. Java/Kotlin `adapter/out/...`),
+ * not only a build-output dir. It must NOT be blanket-skipped in any mode;
+ * build artifacts inside an `out/` dir are still filtered by suffix rules
+ * (.class is in ALWAYS_IGNORED_SUFFIXES). Regression for the issue where
+ * fast/moderate reindex missed classes under .../adapter/out/hubspot/. */
+TEST(no_skip_out_package) {
+    ASSERT_FALSE(cbm_should_skip_dir("out", CBM_MODE_FULL));
+    ASSERT_FALSE(cbm_should_skip_dir("out", CBM_MODE_MODERATE));
+    ASSERT_FALSE(cbm_should_skip_dir("out", CBM_MODE_FAST));
+    PASS();
+}
+
 /* ── Suffix filters ────────────────────────────────────────────── */
 
 TEST(suffix_pyc) {
@@ -822,7 +834,10 @@ TEST(discover_generic_dirs_fast_mode) {
 
     int rc = cbm_discover(base, &opts, &files, &count);
     ASSERT_EQ(rc, 0);
-    ASSERT_EQ(count, 0);
+    /* bin and build are still skipped in fast mode, but `out` is a valid
+     * source-package name and is no longer blanket-skipped. */
+    ASSERT_EQ(count, 1);
+    ASSERT_TRUE(discover_has_rel_path(files, count, "out/main.go"));
 
     cbm_discover_free(files, count);
     th_cleanup(base);
@@ -960,6 +975,30 @@ TEST(discover_cbmignore_negates_fast_skip_dir) {
     ASSERT_EQ(count, 2);
     ASSERT_TRUE(discover_has_rel_path(files, count, "main.go"));
     ASSERT_TRUE(discover_has_rel_path(files, count, "docs/guide.go"));
+
+    cbm_discover_free(files, count);
+    th_cleanup(base);
+    PASS();
+}
+
+/* A source package literally named `out` (not a build output) must be
+ * discovered in moderate/fast mode. Regression for the missed
+ * .../adapter/out/hubspot/ classes after fast reindex. */
+TEST(discover_indexes_out_source_package) {
+    char *base = th_mktempdir("cbm_disc_out_pkg");
+    ASSERT(base != NULL);
+
+    th_write_file(TH_PATH(base, "main.go"), "package main\n");
+    th_write_file(TH_PATH(base, "adapter/out/hubspot/client.go"), "package hubspot\n");
+
+    cbm_discover_opts_t opts = {.mode = CBM_MODE_FAST};
+    cbm_file_info_t *files = NULL;
+    int count = 0;
+
+    int rc = cbm_discover(base, &opts, &files, &count);
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(discover_has_rel_path(files, count, "main.go"));
+    ASSERT_TRUE(discover_has_rel_path(files, count, "adapter/out/hubspot/client.go"));
 
     cbm_discover_free(files, count);
     th_cleanup(base);
@@ -1274,6 +1313,7 @@ SUITE(discover) {
     RUN_TEST(skip_fast_assets);
     RUN_TEST(skip_fast_3rdparty);
     RUN_TEST(skip_fast_e2e);
+    RUN_TEST(no_skip_out_package);
 
     /* Suffix filters */
     RUN_TEST(suffix_pyc);
@@ -1342,6 +1382,7 @@ SUITE(discover) {
     RUN_TEST(discover_cbmignore_negates_always_skip_dir);
     RUN_TEST(discover_cbmignore_negates_only_nested_skip_dir);
     RUN_TEST(discover_cbmignore_negates_fast_skip_dir);
+    RUN_TEST(discover_indexes_out_source_package);
     RUN_TEST(discover_cbmignore_negation_last_match_wins);
     RUN_TEST(discover_cbmignore_negation_cannot_unskip_safety_core);
 

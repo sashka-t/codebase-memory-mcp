@@ -163,6 +163,7 @@ Removes all agent configs, skills, hooks, and instructions. Does not remove the 
 - **BM25 full-text search** via SQLite FTS5 with `cbm_camel_split` tokenizer (camelCase / snake_case aware)
 - **Structural search** (`search_graph`): regex name patterns, label filters, min/max degree, file scoping
 - **Code search** (`search_code`): graph-augmented grep over indexed files only
+- **Resource search** (`search_resources`): text (regex/substring) and structural (JSONPath) search over non-code resource/data files (JSON/YAML/CSV/TOML/INI/config) that are not symbol-indexed. Works on a `repo_path` without requiring a prior `index_repository` run. Path-traversal guarded, bounded matches with context.
 
 ### Cross-service linking
 - **HTTP** route ↔ call-site matching with confidence scoring
@@ -184,6 +185,7 @@ Removes all agent configs, skills, hooks, and instructions. Does not remove the 
 
 ### Indexing pipeline
 - **158 vendored tree-sitter grammars** compiled into the binary
+- **JVM member fields**: class / object / trait / companion `val`, `var`, `lazy val` (Scala), `val` / `var` (Kotlin), and `def` / typed properties (Groovy) are extracted as class-scoped `Field` nodes — not just methods. Scala 3 `given` instances and `extension` blocks are indexed as class-like definitions (their member methods are extracted too).
 - **Generic package / module resolution** — bare specifiers like `@myorg/pkg`, `github.com/foo/bar`, `use my_crate::foo` resolved via manifest scanning (`package.json`, `go.mod`, `Cargo.toml`, `pyproject.toml`, `composer.json`, `pubspec.yaml`, `pom.xml`, `build.gradle`, `mix.exs`, `*.gemspec`)
 - **Infrastructure-as-code indexing** — Dockerfiles, Kubernetes manifests, Kustomize overlays as graph nodes
 - **[Hybrid LSP semantic type resolution](#hybrid-lsp)** for Python, TypeScript / JavaScript / JSX / TSX, PHP, C#, Go, C, C++, Java, Kotlin, and Rust — a lightweight C implementation of language type-resolution algorithms, structurally inspired by and compatible with major language servers including tsserver / typescript-go, pyright, gopls, Roslyn, Eclipse JDT, and rust-analyzer (parameter binding, return-type inference, generic substitution, JSX component dispatch, JSDoc inference for plain JS files, namespace + trait + late-static-binding resolution for PHP, file-scoped namespaces + records + LINQ method syntax for C#, class-hierarchy + overload + lambda resolution for Java, extension-function + scope-function resolution for Kotlin, trait-method + UFCS resolution for Rust)
@@ -431,9 +433,10 @@ codebase-memory-mcp cli --raw search_graph '{"label": "Function"}' | jq '.result
 | `detect_changes` | Map git diff to affected symbols + blast radius with risk classification. |
 | `query_graph` | Execute Cypher-like graph queries (read-only). |
 | `get_graph_schema` | Node/edge counts, relationship patterns, property definitions per label. Run this first. |
-| `get_code_snippet` | Read source code for a function by qualified name. |
+| `get_code_snippet` | Read source code for a function by qualified name. For non-code resource/data files (JSON/YAML/config) use `search_resources` instead. |
 | `get_architecture` | Codebase overview: languages, packages, routes, hotspots, clusters, ADR. |
-| `search_code` | Grep-like text search within indexed project files. |
+| `search_code` | Grep-like text search within indexed project files (code only). For non-code resource/data files use `search_resources`. |
+| `search_resources` | Text (regex/substring) + structural (JSONPath) search over non-code resource/data files (JSON/YAML/CSV/TOML/INI/config). Does not require prior indexing — accepts `repo_path`. Bounded matches with context, path-traversal guarded. |
 | `manage_adr` | CRUD for Architecture Decision Records. |
 | `ingest_traces` | Ingest runtime traces to validate HTTP_CALLS edges. |
 

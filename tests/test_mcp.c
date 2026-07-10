@@ -586,37 +586,22 @@ TEST(server_handle_tools_list) {
     PASS();
 }
 
-TEST(server_handle_tools_list_paginates) {
+TEST(server_handle_tools_list_single_page) {
+    /* MCP_TOOLS_PAGE_SIZE is sized to fit every advertised tool in one page
+     * because Cursor's MCP client does not follow tools/list nextCursor — a
+     * small page hid every tool past the first page. A single tools/list must
+     * therefore return the full set with no nextCursor. */
     cbm_mcp_server_t *srv = cbm_mcp_server_new(NULL);
 
     char *resp =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":200,\"method\":\"tools/list\"}");
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":200"));
-    ASSERT_NOT_NULL(strstr(resp, "\"nextCursor\":\"8\""));
-    ASSERT_NOT_NULL(strstr(resp, "index_repository"));
-    ASSERT_NULL(strstr(resp, "manage_adr"));
-    free(resp);
-
-    /* Page 2 (cursor=8): manage_adr sits here; the tool set spans more
-     * pages, so a nextCursor points at the final page. */
-    resp = cbm_mcp_server_handle(
-        srv,
-        "{\"jsonrpc\":\"2.0\",\"id\":201,\"method\":\"tools/list\",\"params\":{\"cursor\":\"8\"}}");
-    ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "\"id\":201"));
-    ASSERT_NOT_NULL(strstr(resp, "\"nextCursor\":\"16\""));
-    ASSERT_NOT_NULL(strstr(resp, "manage_adr"));
-    free(resp);
-
-    /* Page 3 (cursor=16): last page — no nextCursor, tail tool present. */
-    resp = cbm_mcp_server_handle(
-        srv,
-        "{\"jsonrpc\":\"2.0\",\"id\":202,\"method\":\"tools/list\",\"params\":{\"cursor\":\"16\"}}");
-    ASSERT_NOT_NULL(resp);
-    ASSERT_NOT_NULL(strstr(resp, "\"id\":202"));
     ASSERT_NULL(strstr(resp, "\"nextCursor\""));
+    ASSERT_NOT_NULL(strstr(resp, "index_repository"));
+    ASSERT_NOT_NULL(strstr(resp, "manage_adr"));
     ASSERT_NOT_NULL(strstr(resp, "search_raw_artifacts"));
+    ASSERT_NOT_NULL(strstr(resp, "search_resources"));
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -2002,6 +1987,309 @@ TEST(search_code_ampersand_accepted_issue272) {
 
     cleanup_snippet_dir(tmp);
     cbm_mcp_server_free(srv);
+    PASS();
+}
+
+/* ── search_resources fixtures ─────────────────────────────────── */
+/* Build a non-indexed temp repo with a JSON fixture (ar.json), a YAML under
+ * locales/, and a code file (app.py). search_resources must work without any
+ * index_repository call — that is its purpose for data/skip-list files. */
+static cbm_mcp_server_t *setup_resources_repo(char *tmp, size_t tmp_sz) {
+    snprintf(tmp, tmp_sz, "/tmp/cbm_sr_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        return NULL;
+    }
+    char d[640];
+    snprintf(d, sizeof(d), "%s/locales", tmp);
+    cbm_mkdir(d);
+
+    char p[768];
+    snprintf(p, sizeof(p), "%s/ar.json", tmp);
+    FILE *fp = fopen(p, "w");
+    if (!fp) {
+        return NULL;
+    }
+    fputs("{\n"
+          "  \"foo\": {\n"
+          "    \"bar\": 42,\n"
+          "    \"baz\": \"hello\"\n"
+          "  },\n"
+          "  \"items\": [\n"
+          "    {\"id\": 1},\n"
+          "    {\"id\": 2}\n"
+          "  ]\n"
+          "}\n",
+          fp);
+    fclose(fp);
+
+    snprintf(p, sizeof(p), "%s/locales/messages.yaml", tmp);
+    fp = fopen(p, "w");
+    if (!fp) {
+        return NULL;
+    }
+    fputs("greeting: hello\nfarewell: goodbye\n", fp);
+    fclose(fp);
+
+    snprintf(p, sizeof(p), "%s/app.py", tmp);
+    fp = fopen(p, "w");
+    if (!fp) {
+        return NULL;
+    }
+    fputs("def main():\n    pass\n", fp);
+    fclose(fp);
+
+    /* many.txt — 10 matching lines for pagination. */
+    snprintf(p, sizeof(p), "%s/many.txt", tmp);
+    fp = fopen(p, "w");
+    if (!fp) {
+        return NULL;
+    }
+    for (int i = 0; i < 10; i++) {
+        fprintf(fp, "hello world %d\n", i);
+    }
+    fclose(fp);
+
+    return cbm_mcp_server_new(NULL);
+}
+
+static void cleanup_resources_repo(const char *tmp) {
+    char p[768];
+    snprintf(p, sizeof(p), "%s/locales/messages.yaml", tmp);
+    remove(p);
+    snprintf(p, sizeof(p), "%s/locales", tmp);
+    cbm_rmdir(p);
+    snprintf(p, sizeof(p), "%s/ar.json", tmp);
+    remove(p);
+    snprintf(p, sizeof(p), "%s/app.py", tmp);
+    remove(p);
+    snprintf(p, sizeof(p), "%s/many.txt", tmp);
+    remove(p);
+    cbm_rmdir(tmp);
+}
+
+TEST(tool_search_resources_text) {
+    char tmp[512];
+    cbm_mcp_server_t *srv = setup_resources_repo(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char args[1024];
+    snprintf(args, sizeof(args),
+             "{\"query\":\"hello\",\"repo_path\":\"%s\",\"file_path\":\"ar.json\"}", tmp);
+    char *resp = cbm_mcp_handle_tool(srv, "search_resources", args);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "\"isError\":true"));
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    /* "hello" appears on the baz line; expect at least one match with context. */
+    ASSERT_TRUE(strstr(inner, "\"line_text\":") != NULL);
+    ASSERT_TRUE(strstr(inner, "hello") != NULL);
+    ASSERT_TRUE(strstr(inner, "\"context\":") != NULL);
+    int total = -1;
+    const char *t = strstr(inner, "\"total\":");
+    if (t) {
+        sscanf(t, "\"total\":%d", &total);
+    }
+    ASSERT_TRUE(total >= 1);
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    cleanup_resources_repo(tmp);
+    PASS();
+}
+
+TEST(tool_search_resources_structural) {
+    char tmp[512];
+    cbm_mcp_server_t *srv = setup_resources_repo(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char args[1024];
+    snprintf(args, sizeof(args),
+             "{\"query\":\"$.foo.bar\",\"mode\":\"structural\",\"repo_path\":\"%s\","
+             "\"file_path\":\"ar.json\"}",
+             tmp);
+    char *resp = cbm_mcp_handle_tool(srv, "search_resources", args);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "\"isError\":true"));
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_TRUE(strstr(inner, "\"structural_matches\":") != NULL);
+    ASSERT_TRUE(strstr(inner, "\"json_path\":\"$.foo.bar\"") != NULL);
+    ASSERT_TRUE(strstr(inner, "\"key\":\"bar\"") != NULL);
+    ASSERT_TRUE(strstr(inner, "\"value\":\"42\"") != NULL);
+    ASSERT_TRUE(strstr(inner, "\"value_type\":\"integer\"") != NULL);
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    cleanup_resources_repo(tmp);
+    PASS();
+}
+
+TEST(tool_search_resources_glob) {
+    char tmp[512];
+    cbm_mcp_server_t *srv = setup_resources_repo(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char args[1024];
+    snprintf(args, sizeof(args),
+             "{\"query\":\"hello\",\"repo_path\":\"%s\",\"file_pattern\":\"**/*.yaml\"}", tmp);
+    char *resp = cbm_mcp_handle_tool(srv, "search_resources", args);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "\"isError\":true"));
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    /* Glob restricts to YAML; ar.json (which also contains "hello") must NOT
+     * appear — only locales/messages.yaml. */
+    ASSERT_TRUE(strstr(inner, "messages.yaml") != NULL);
+    ASSERT_TRUE(strstr(inner, "ar.json") == NULL);
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    cleanup_resources_repo(tmp);
+    PASS();
+}
+
+TEST(tool_search_resources_traversal) {
+    char tmp[512];
+    cbm_mcp_server_t *srv = setup_resources_repo(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char args[1024];
+    snprintf(args, sizeof(args),
+             "{\"query\":\"x\",\"repo_path\":\"%s\",\"file_path\":\"../secret.json\"}", tmp);
+    char *resp = cbm_mcp_handle_tool(srv, "search_resources", args);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_TRUE(strstr(resp, "\"isError\":true") != NULL);
+    ASSERT_TRUE(strstr(resp, "..") != NULL);
+    free(resp);
+
+    /* repo_path with `..` is also rejected. */
+    snprintf(args, sizeof(args), "{\"query\":\"x\",\"repo_path\":\"%s/../..\"}", tmp);
+    resp = cbm_mcp_handle_tool(srv, "search_resources", args);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_TRUE(strstr(resp, "\"isError\":true") != NULL);
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    cleanup_resources_repo(tmp);
+    PASS();
+}
+
+TEST(tool_search_resources_outside_root) {
+    char tmp[512];
+    cbm_mcp_server_t *srv = setup_resources_repo(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    /* file_path escaping the root via nested `..` must be refused. */
+    char args[1024];
+    snprintf(args, sizeof(args),
+             "{\"query\":\"x\",\"repo_path\":\"%s\",\"file_path\":\"locales/../../etc/passwd\"}",
+             tmp);
+    char *resp = cbm_mcp_handle_tool(srv, "search_resources", args);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_TRUE(strstr(resp, "\"isError\":true") != NULL);
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    cleanup_resources_repo(tmp);
+    PASS();
+}
+
+TEST(tool_search_resources_code_rejected) {
+    char tmp[512];
+    cbm_mcp_server_t *srv = setup_resources_repo(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    /* A .py file is a code file, not a resource → reject with a search_code hint
+     * and emit zero matches. */
+    char args[1024];
+    snprintf(args, sizeof(args),
+             "{\"query\":\"main\",\"repo_path\":\"%s\",\"file_path\":\"app.py\"}", tmp);
+    char *resp = cbm_mcp_handle_tool(srv, "search_resources", args);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "\"isError\":true"));
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_TRUE(strstr(inner, "use search_code") != NULL);
+    ASSERT_TRUE(strstr(inner, "\"total\":0") != NULL);
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    cleanup_resources_repo(tmp);
+    PASS();
+}
+
+TEST(tool_search_resources_not_indexed) {
+    /* The repo is deliberately NOT indexed (no index_repository call). The tool
+     * must still resolve repo_path and return matches — the core use case for
+     * data files the graph does not model. */
+    char tmp[512];
+    cbm_mcp_server_t *srv = setup_resources_repo(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char args[1024];
+    snprintf(args, sizeof(args), "{\"query\":\"hello\",\"repo_path\":\"%s\"}", tmp);
+    char *resp = cbm_mcp_handle_tool(srv, "search_resources", args);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "\"isError\":true"));
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_TRUE(strstr(inner, "\"total\":") != NULL);
+    /* "hello" appears in ar.json and messages.yaml. */
+    int total = -1;
+    const char *t = strstr(inner, "\"total\":");
+    if (t) {
+        sscanf(t, "\"total\":%d", &total);
+    }
+    ASSERT_TRUE(total >= 2);
+    free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    cleanup_resources_repo(tmp);
+    PASS();
+}
+
+TEST(tool_search_resources_pagination) {
+    char tmp[512];
+    cbm_mcp_server_t *srv = setup_resources_repo(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    /* many.txt has 10 "hello" lines; limit to 3 → page 1. */
+    char args[1024];
+    snprintf(args, sizeof(args),
+             "{\"query\":\"hello\",\"repo_path\":\"%s\",\"file_path\":\"many.txt\",\"limit\":3}",
+             tmp);
+    char *resp = cbm_mcp_handle_tool(srv, "search_resources", args);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "\"isError\":true"));
+    char *inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_TRUE(strstr(inner, "\"returned\":3") != NULL);
+    ASSERT_TRUE(strstr(inner, "\"has_more\":true") != NULL);
+    int total = -1;
+    const char *t = strstr(inner, "\"total\":");
+    if (t) {
+        sscanf(t, "\"total\":%d", &total);
+    }
+    ASSERT_TRUE(total >= 10);
+    free(inner);
+    free(resp);
+
+    /* Page 2 via offset=3. */
+    snprintf(args, sizeof(args),
+             "{\"query\":\"hello\",\"repo_path\":\"%s\",\"file_path\":\"many.txt\","
+             "\"limit\":3,\"offset\":3}",
+             tmp);
+    resp = cbm_mcp_handle_tool(srv, "search_resources", args);
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "\"isError\":true"));
+    inner = extract_text_content(resp);
+    ASSERT_NOT_NULL(inner);
+    ASSERT_TRUE(strstr(inner, "\"returned\":3") != NULL);
+    free(inner);
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    cleanup_resources_repo(tmp);
     PASS();
 }
 
@@ -5038,7 +5326,7 @@ SUITE(mcp) {
     RUN_TEST(server_handle_initialize);
     RUN_TEST(server_handle_initialized_notification);
     RUN_TEST(server_handle_tools_list);
-    RUN_TEST(server_handle_tools_list_paginates);
+    RUN_TEST(server_handle_tools_list_single_page);
     RUN_TEST(server_handle_logs_request_without_params);
     RUN_TEST(server_handle_unknown_method);
 
@@ -5089,6 +5377,14 @@ SUITE(mcp) {
     RUN_TEST(search_code_invalid_regex_errors_issue283);
     RUN_TEST(search_code_literal_pipe_warns_issue282);
     RUN_TEST(search_code_ampersand_accepted_issue272);
+    RUN_TEST(tool_search_resources_text);
+    RUN_TEST(tool_search_resources_structural);
+    RUN_TEST(tool_search_resources_glob);
+    RUN_TEST(tool_search_resources_traversal);
+    RUN_TEST(tool_search_resources_outside_root);
+    RUN_TEST(tool_search_resources_code_rejected);
+    RUN_TEST(tool_search_resources_not_indexed);
+    RUN_TEST(tool_search_resources_pagination);
     RUN_TEST(tool_detect_changes_no_project);
     RUN_TEST(tool_manage_adr_no_project);
     RUN_TEST(tool_manage_adr_get_with_existing_adr);

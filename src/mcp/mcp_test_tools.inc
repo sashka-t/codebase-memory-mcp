@@ -23,7 +23,7 @@ static char *mcp_test_json_error(const char *code, const char *message) {
 }
 
 static char *mcp_test_json_error_diag(const char *code, const char *message, const char *cwd,
-                                      int found_roots, int xml_count) {
+                                      int found_roots, int xml_count, const char *detail) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
     if (!doc) {
         return heap_strdup("{\"code\":\"internal\",\"message\":\"oom\"}");
@@ -37,6 +37,9 @@ static char *mcp_test_json_error_diag(const char *code, const char *message, con
     }
     yyjson_mut_obj_add_int(doc, root, "report_roots_found", found_roots);
     yyjson_mut_obj_add_int(doc, root, "xml_files_found", xml_count);
+    if (detail && detail[0]) {
+        yyjson_mut_obj_add_str(doc, root, "detail", detail);
+    }
     yyjson_mut_obj_add_str(
         doc, root, "hint",
         found_roots == 0
@@ -288,6 +291,16 @@ static char *handle_run_tests(cbm_mcp_server_t *srv, const char *args) {
     char *run_id_in = cbm_mcp_get_string_arg(args, "run_id");
     char *format_in = cbm_mcp_get_string_arg(args, "format");
     bool persist = cbm_mcp_get_bool_arg(args, "persist");
+    char *repo_path = cbm_mcp_get_string_arg(args, "repo_path");
+
+    /* Accept repo_path as an alternative to cwd (path-based invocation). */
+    if ((!cwd || !*cwd) && repo_path && *repo_path) {
+        free(cwd);
+        cwd = repo_path;
+        repo_path = NULL;
+    }
+    free(repo_path);
+    repo_path = NULL;
 
     if (!command || !*command || !cwd || !*cwd) {
         free(command);
@@ -465,6 +478,16 @@ static char *handle_ingest_test_reports(cbm_mcp_server_t *srv, const char *args)
     char *format_in = cbm_mcp_get_string_arg(args, "format");
     char *report_dir = cbm_mcp_get_string_arg(args, "report_dir");
     bool persist = cbm_mcp_get_bool_arg(args, "persist");
+    char *repo_path = cbm_mcp_get_string_arg(args, "repo_path");
+
+    /* Accept repo_path as an alternative to cwd (path-based invocation). */
+    if ((!cwd || !*cwd) && repo_path && *repo_path) {
+        free(cwd);
+        cwd = repo_path;
+        repo_path = NULL;
+    }
+    free(repo_path);
+    repo_path = NULL;
 
     if (!cwd || !*cwd) {
         free(cwd);
@@ -502,13 +525,18 @@ static char *handle_ingest_test_reports(cbm_mcp_server_t *srv, const char *args)
         int found_roots = 0;
         int xml_count = 0;
         (void)cbm_probe_report_roots(cwd, &found_roots, &xml_count);
+        const char *detail = cbm_junit_xml_last_error();
+        const char *msg = (found_roots == 0)
+                              ? "no test report directories found under cwd"
+                              : "failed to parse test reports";
         char *cwd_copy = heap_strdup(cwd);
         free(cwd);
         free(project);
         free(run_id_in);
         free(format_in);
-        char *ej = mcp_test_json_error_diag("test_run_failed", "failed to parse test reports",
-                                            cwd_copy ? cwd_copy : "", found_roots, xml_count);
+        char *ej = mcp_test_json_error_diag("test_run_failed", msg,
+                                            cwd_copy ? cwd_copy : "", found_roots, xml_count,
+                                            detail);
         free(cwd_copy);
         char *rr = cbm_mcp_text_result(ej, true);
         free(ej);

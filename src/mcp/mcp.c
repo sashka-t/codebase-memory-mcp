@@ -32,7 +32,10 @@ enum {
     MCP_URI_PREFIX = 7,      /* strlen("file://") */
     MCP_CONTENT_PREFIX = 15, /* strlen("Content-Length:") */
     MCP_RETURN_2 = 2,
-    MCP_TOOLS_PAGE_SIZE = 8,
+    MCP_TOOLS_PAGE_SIZE = 128, /* all tools in one page; Cursor's MCP client
+                                * does not follow tools/list nextCursor, so a
+                                * small page hides the rest. 128 covers the
+                                * current ~25 tools with headroom. */
 };
 #define MCP_MS_TO_US 1000LL
 #define MCP_S_TO_US 1000000LL
@@ -455,7 +458,9 @@ static const tool_def_t TOOLS[] = {
      "full qualified_name (exact match) or short function name (returns suggestions if ambiguous). "
      "If the response carries a 'coverage_note', the file was only partially indexed — constructs "
      "in the noted line ranges may be missing from the graph (best-effort signal); prefer grep "
-     "there and treat the returned source as ground truth.",
+     "there and treat the returned source as ground truth. "
+     "For data/resource files (JSON/YAML/CSV/config) or symbols outside the graph, use "
+     "search_resources instead.",
      "{\"type\":\"object\",\"properties\":{\"qualified_name\":{\"type\":\"string\",\"description\":"
      "\"Full qualified_name from search_graph, or short function name\"},\"project\":{"
      "\"type\":\"string\"},\"repo_path\":{\"type\":\"string\",\"description\":\"Alternative to "
@@ -467,6 +472,43 @@ static const tool_def_t TOOLS[] = {
      "Get the schema of the knowledge graph (node labels, edge types)",
      "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"}},\"required\":["
      "\"project\"]}"},
+
+    {"search_resources", "Search resource files",
+     "Search NON-CODE resource/data files (JSON/YAML/CSV/INI/TOML/Properties/Markdown/config/"
+     "i18n) that the graph does NOT model as navigable definitions — including files the indexer "
+     "skips (config JSON, gitignore/skip-list entries, pure data files). Use this when a symbol or "
+     "value is absent from the graph, or when you need content of a data file (e.g. a fixture, "
+     "manifest, i18n catalog, or config). Returns bounded MATCHES WITH CONTEXT, never a full file "
+     "dump. Two modes: text (default) — regex/substring line search with context (like search_code "
+     "but over data files outside the graph); structural — JSONPath subset ($.a.b, $.items[*].id, "
+     "$.*, [n]) over JSON via yyjson, returning matching keys/values with best-effort line numbers "
+     "(JSON only; YAML/CSV/INI/TOML structural not supported — use mode=text). For CODE files "
+     "(.py/.go/.ts/etc.) use search_code instead. Supports non-indexed repos via repo_path. "
+     "PAGINATION: results capped at limit (default 50, max 200); response carries 'total' and "
+     "'has_more' — page by re-calling with offset=offset+limit while has_more is true.",
+     "{\"type\":\"object\",\"properties\":{"
+     "\"query\":{\"type\":\"string\",\"description\":\"text mode: substring or regex (with "
+     "regex=true) to match per line; structural mode: JSONPath expression ($.a.b, $.items[*].id, "
+     "$.*, $.a[2]).\"},"
+     "\"mode\":{\"type\":\"string\",\"enum\":[\"text\",\"structural\"],\"default\":\"text\"},"
+     "\"file_pattern\":{\"type\":\"string\",\"description\":\"Glob restricting which resource "
+     "files to scan (e.g. **/locales/*.yaml or *.json). Supports **, *, ?. Scoped to repo root.\"},"
+     "\"file_path\":{\"type\":\"string\",\"description\":\"Single resource file (repo-relative) "
+     "to search. Takes precedence over file_pattern.\"},"
+     "\"regex\":{\"type\":\"boolean\",\"default\":false,\"description\":\"text mode: treat query "
+     "as an extended regex.\"},"
+     "\"context_lines\":{\"type\":\"integer\",\"default\":2,\"description\":\"text mode: lines of "
+     "context around each match (max 20).\"},"
+     "\"limit\":{\"type\":\"integer\",\"default\":50,\"description\":\"Max matches per call "
+     "(hard cap 200). Response carries 'total' and 'has_more'.\"},"
+     "\"offset\":{\"type\":\"integer\",\"default\":0,\"description\":\"Skip the first N matches. "
+     "Page by incrementing offset by limit while has_more is true.\"},"
+     "\"project\":{\"type\":\"string\"},"
+     "\"repo_path\":{\"type\":\"string\",\"description\":\"Alternative to project: absolute "
+     "repository path; works for repos that have NOT been indexed (the primary use case for data "
+     "files).\"}"
+     "},\"required\":[\"query\"]}"},
+
 
     {"get_architecture", "Get architecture",
      "Get high-level architecture overview — packages, services, dependencies, and project "
@@ -494,7 +536,9 @@ static const tool_def_t TOOLS[] = {
      "TRUNCATION: enriched results are capped at limit (default 10). Response carries "
      "'total_grep_matches' (raw grep hit count) and 'total_results' (deduplicated function "
      "count) — compare to limit to detect truncation. There is no offset parameter; to see "
-     "more, raise limit or narrow the query with file_pattern / path_filter.",
+     "more, raise limit or narrow the query with file_pattern / path_filter. "
+     "Covers CODE files only; for resource/data files (JSON/YAML/CSV/config/i18n) use "
+     "search_resources.",
      "{\"type\":\"object\",\"properties\":{\"pattern\":{\"type\":\"string\"},\"project\":{\"type\":"
      "\"string\"},\"file_pattern\":{\"type\":\"string\",\"description\":\"Glob for grep "
      "--include (e.g. *.go)\"},\"path_filter\":{\"type\":\"string\",\"description\":\"Regex "
@@ -561,24 +605,26 @@ static const tool_def_t TOOLS[] = {
      "gradle, ./gradlew, mvn, go test, pytest, or sbt. Prefer tests[] for Gradle --tests filters.\"},"
      "\"tests\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"Gradle/Maven test patterns; appended as --tests <pattern> (shell-safe quoting).\"},"
      "\"cwd\":{\"type\":\"string\",\"description\":\"Working directory. Must pass cbm_validate_shell_arg.\"},"
+     "\"repo_path\":{\"type\":\"string\",\"description\":\"Alternative to cwd: absolute repository path.\"},"
      "\"project\":{\"type\":\"string\",\"description\":\"Project name for TESTS edge cross-reference. Optional.\"},"
      "\"run_id\":{\"type\":\"string\"},"
      "\"persist\":{\"type\":\"boolean\",\"description\":\"If true and run_id is omitted, server generates a timestamp-based run_id. Default false.\"},"
      "\"format\":{\"type\":\"string\",\"enum\":[\"auto\",\"junit_xml\",\"go_test\",\"pytest\",\"sbt\"]},"
      "\"timeout_seconds\":{\"type\":\"integer\",\"description\":\"Kill runner after N seconds. Default 600.\"}"
-     "},\"required\":[\"command\",\"cwd\"]}"},
+     "},\"required\":[\"command\"]}"},
 
     {"ingest_test_reports", "Ingest test reports",
      "Parse existing JUnit XML test reports from disk (Gradle/Maven/sbt/IntelliJ). Auto-scans "
      "standard directories under cwd (including Gradle submodules) unless report_dir is set.",
      "{\"type\":\"object\",\"properties\":{"
-     "\"cwd\":{\"type\":\"string\"},"
+     "\"cwd\":{\"type\":\"string\",\"description\":\"Working directory of the project under test.\"},"
+     "\"repo_path\":{\"type\":\"string\",\"description\":\"Alternative to cwd: absolute repository path.\"},"
      "\"project\":{\"type\":\"string\"},"
      "\"run_id\":{\"type\":\"string\"},"
      "\"persist\":{\"type\":\"boolean\"},"
      "\"report_dir\":{\"type\":\"string\",\"description\":\"Override auto-scan. Parses all *.xml files under this directory.\"},"
      "\"format\":{\"type\":\"string\",\"enum\":[\"auto\",\"junit_xml\",\"go_test\",\"pytest\",\"sbt\"]}"
-     "},\"required\":[\"cwd\"]}"},
+     "},\"required\":[]}"},
 
     {"query_test_results", "Query test results",
      "Query a persisted test run. Returns matching test cases filtered by status, name, and/or "
@@ -5821,6 +5867,919 @@ static char *handle_search_code(cbm_mcp_server_t *srv, const char *args) {
     return result;
 }
 
+/* ── search_resources ──────────────────────────────────────────── */
+/* Search non-code resource/data files (JSON/YAML/CSV/INI/TOML/Properties/
+ * Markdown/config/i18n) that the graph does NOT model as navigable definitions.
+ * Covers files the indexer skips (config JSON, gitignore/skip-list, data files).
+ * Returns bounded matches with context — NOT a full file dump. Two modes:
+ *   text (default): regex/substring line search (like search_code but over data
+ *                   files outside the graph).
+ *   structural:     JSONPath subset ($.a.b, $.items[*].id, $.*, [n]) over JSON
+ *                   via yyjson; returns matching keys/values with best-effort
+ *                   line numbers. YAML/CSV/INI/TOML structural is not supported
+ *                   (use mode=text). For code files use search_code. */
+
+enum {
+    SR_MAX_FILE_BYTES_TEXT = 1 << 20,   /* 1 MB hard cap for text mode */
+    SR_MAX_FILE_BYTES_STRUCT = 5 << 20, /* 5 MB hard cap for structural mode */
+    SR_MAX_MATCHES_PER_FILE = 200,
+    SR_MAX_FILES_SCAN = 4000,
+    SR_DEFAULT_LIMIT = 50,
+    SR_HARD_LIMIT = 200,
+    SR_DEFAULT_CONTEXT = 2,
+};
+
+static const char *SR_RESOURCE_EXTS[] = {
+    ".json", ".json5", ".jsonc", ".yaml", ".yml", ".csv", ".tsv", ".ini",
+    ".toml", ".properties", ".props", ".md", ".markdown", ".txt", ".env",
+    ".cfg", ".conf", ".xml", NULL};
+
+static const char *SR_JSON_EXTS[] = {".json", ".json5", ".jsonc", NULL};
+
+static bool sr_is_resource_ext(const char *name) {
+    const char *dot = strrchr(name, '.');
+    if (!dot) {
+        return false;
+    }
+    for (const char **e = SR_RESOURCE_EXTS; *e; e++) {
+        if (strcasecmp(dot, *e) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool sr_is_json_ext(const char *name) {
+    const char *dot = strrchr(name, '.');
+    if (!dot) {
+        return false;
+    }
+    for (const char **e = SR_JSON_EXTS; *e; e++) {
+        if (strcasecmp(dot, *e) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Reject `..` traversal segments in a user-supplied relative path/pattern. */
+static bool sr_path_has_traversal(const char *s) {
+    if (!s) {
+        return false;
+    }
+    while (*s) {
+        if (s[0] == '.' && s[1] == '.' &&
+            (s[2] == '/' || s[2] == '\\' || s[2] == '\0')) {
+            return true;
+        }
+        while (*s && *s != '/' && *s != '\\') {
+            s++;
+        }
+        if (*s) {
+            s++;
+        }
+    }
+    return false;
+}
+
+/* Glob matcher supporting `**` (matches across '/'), `*` (within a segment),
+ * and `?` (one char, not '/'). Matches against '/'-separated relative paths. */
+static bool sr_glob_match(const char *pat, const char *str) {
+    while (*pat) {
+        if (pat[0] == '*' && pat[1] == '*') {
+            pat += 2;
+            if (*pat == '/') {
+                pat++;
+            }
+            if (*pat == '\0') {
+                return true;
+            }
+            while (*str) {
+                if (sr_glob_match(pat, str)) {
+                    return true;
+                }
+                str++;
+            }
+            return sr_glob_match(pat, str);
+        } else if (*pat == '*') {
+            pat++;
+            while (*str && *str != '/') {
+                if (sr_glob_match(pat, str)) {
+                    return true;
+                }
+                str++;
+            }
+            return sr_glob_match(pat, str);
+        } else if (*pat == '?') {
+            if (!*str || *str == '/') {
+                return false;
+            }
+            pat++;
+            str++;
+        } else {
+            if (*pat != *str) {
+                return false;
+            }
+            pat++;
+            str++;
+        }
+    }
+    return *str == '\0';
+}
+
+typedef struct {
+    size_t off;
+    size_t len; /* excluding trailing \r\n */
+} sr_line_t;
+
+/* Split a buffer into 1-based line offsets. Returns malloc'd array (caller
+ * frees) and the line count via *out_n. */
+static sr_line_t *sr_build_lines(const char *buf, size_t buflen, int *out_n) {
+    int n = 1;
+    for (size_t i = 0; i < buflen; i++) {
+        if (buf[i] == '\n') {
+            n++;
+        }
+    }
+    sr_line_t *lines = malloc(sizeof(sr_line_t) * (size_t)n);
+    if (!lines) {
+        *out_n = 0;
+        return NULL;
+    }
+    int li = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= buflen; i++) {
+        if (i == buflen || buf[i] == '\n') {
+            lines[li].off = start;
+            lines[li].len = i - start;
+            while (lines[li].len > 0 && buf[start + lines[li].len - 1] == '\r') {
+                lines[li].len--;
+            }
+            li++;
+            start = i + 1;
+        }
+    }
+    *out_n = li;
+    return lines;
+}
+
+static char *sr_line_text(const char *buf, const sr_line_t *line) {
+    char *t = malloc(line->len + 1);
+    if (!t) {
+        return NULL;
+    }
+    memcpy(t, buf + line->off, line->len);
+    t[line->len] = '\0';
+    return t;
+}
+
+/* 1-based line number containing byte offset `off`. */
+static int sr_offset_to_line(const sr_line_t *lines, int n, size_t off) {
+    int lo = 0, hi = n - 1, res = 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (off >= lines[mid].off) {
+            res = mid + 1;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return res;
+}
+
+/* Read up to max_bytes of a file into a malloc'd, NUL-terminated buffer. */
+static char *sr_read_file_capped(const char *path, size_t max_bytes, size_t *out_len) {
+    FILE *fp = cbm_fopen(path, "rb");
+    if (!fp) {
+        return NULL;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    long sz = ftell(fp);
+    if (sz < 0) {
+        fclose(fp);
+        return NULL;
+    }
+    if ((size_t)sz > max_bytes) {
+        sz = (long)max_bytes;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) {
+        fclose(fp);
+        return NULL;
+    }
+    size_t rd = fread(buf, 1, (size_t)sz, fp);
+    fclose(fp);
+    buf[rd] = '\0';
+    if (out_len) {
+        *out_len = rd;
+    }
+    return buf;
+}
+
+typedef struct {
+    char **paths;
+    int count;
+    int cap;
+} sr_pathlist_t;
+
+static bool sr_pathlist_push(sr_pathlist_t *pl, const char *rel) {
+    if (pl->count == pl->cap) {
+        int ncap = pl->cap ? pl->cap * 2 : 64;
+        char **np = safe_realloc(pl->paths, sizeof(char *) * (size_t)ncap);
+        if (!np) {
+            return false;
+        }
+        pl->paths = np;
+        pl->cap = ncap;
+    }
+    pl->paths[pl->count] = heap_strdup(rel);
+    if (!pl->paths[pl->count]) {
+        return false;
+    }
+    pl->count++;
+    return true;
+}
+
+static void sr_pathlist_free(sr_pathlist_t *pl) {
+    for (int i = 0; i < pl->count; i++) {
+        free(pl->paths[i]);
+    }
+    free(pl->paths);
+    pl->paths = NULL;
+    pl->count = pl->cap = 0;
+}
+
+/* Skip directories that are never useful resource targets and would explode the
+ * walk (.git, build outputs, vendored deps, language caches). */
+static bool sr_skip_dir(const char *name) {
+    if (name[0] == '.') {
+        return true;
+    }
+    static const char *skip[] = {"node_modules", "build",        "dist",     "target",
+                                 "__pycache__", ".venv",        "venv",     "vendor",
+                                 "deps",        "Pods",         NULL};
+    for (const char **s = skip; *s; s++) {
+        if (strcmp(name, *s) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void sr_walk_resources(const char *root, const char *rel, sr_pathlist_t *out,
+                              const char *glob, int *files_seen) {
+    char abs_path[CBM_SZ_4K];
+    snprintf(abs_path, sizeof(abs_path), "%s/%s", root, rel);
+    cbm_dir_t *d = cbm_opendir(abs_path);
+    if (!d) {
+        return;
+    }
+    cbm_dirent_t *e;
+    while ((e = cbm_readdir(d)) != NULL) {
+        if (strcmp(e->name, ".") == 0 || strcmp(e->name, "..") == 0) {
+            continue;
+        }
+        if ((*files_seen) > SR_MAX_FILES_SCAN) {
+            break;
+        }
+        char child_rel[CBM_SZ_4K];
+        if (rel[0]) {
+            snprintf(child_rel, sizeof(child_rel), "%s/%s", rel, e->name);
+        } else {
+            snprintf(child_rel, sizeof(child_rel), "%s", e->name);
+        }
+        if (e->is_dir) {
+            if (sr_skip_dir(e->name)) {
+                continue;
+            }
+            sr_walk_resources(root, child_rel, out, glob, files_seen);
+        } else {
+            (*files_seen)++;
+            if (!sr_is_resource_ext(e->name)) {
+                continue;
+            }
+            if (glob && !sr_glob_match(glob, child_rel)) {
+                continue;
+            }
+            sr_pathlist_push(out, child_rel);
+        }
+    }
+    cbm_closedir(d);
+}
+
+/* ── Structural mode: JSONPath subset over a yyjson tree ────────── */
+typedef struct {
+    char *file_path;
+    char *json_path;
+    char *key;
+    char *value;
+    const char *value_type; /* static literal — borrowed, not freed */
+    int start_line;
+    int end_line;
+} sr_struct_match_t;
+
+typedef struct {
+    sr_struct_match_t *items;
+    int count;
+    int cap;
+    const char *buf; /* per-file raw buffer (for line resolution) */
+    sr_line_t *lines;
+    int nlines;
+    size_t key_cursor;
+    const char *cur_file; /* rel path of the file currently being walked */
+} sr_jsonpath_ctx_t;
+
+static const char *sr_json_type_name(yyjson_val *v) {
+    yyjson_type t = yyjson_get_type(v);
+    switch (t) {
+    case YYJSON_TYPE_OBJ:
+        return "object";
+    case YYJSON_TYPE_ARR:
+        return "array";
+    case YYJSON_TYPE_STR:
+        return "string";
+    case YYJSON_TYPE_NUM:
+        return yyjson_is_int(v) ? "integer" : "number";
+    case YYJSON_TYPE_BOOL:
+        return "boolean";
+    case YYJSON_TYPE_NULL:
+        return "null";
+    default:
+        return "unknown";
+    }
+}
+
+static int sr_find_key_line(sr_jsonpath_ctx_t *c, const char *key, const char *value_str) {
+    /* Best-effort line: scan for the first `"key"` at/after the cursor, else the
+     * first occurrence of the serialized value. */
+    const char *needle = NULL;
+    char quoted[CBM_SZ_256];
+    if (key && key[0]) {
+        snprintf(quoted, sizeof(quoted), "\"%s\"", key);
+        needle = quoted;
+    } else if (value_str) {
+        needle = value_str;
+    }
+    if (!needle) {
+        return 0;
+    }
+    size_t nlen = strlen(needle);
+    const char *p = c->buf + c->key_cursor;
+    const char *found = strstr(p, needle);
+    if (!found) {
+        /* Wrap around once so the first match still resolves even if cursor
+         * advanced past it on a previous match with the same key. */
+        found = strstr(c->buf, needle);
+    }
+    if (!found) {
+        return 0;
+    }
+    size_t off = (size_t)(found - c->buf);
+    if (off >= c->key_cursor) {
+        c->key_cursor = off + nlen;
+    }
+    return sr_offset_to_line(c->lines, c->nlines, off);
+}
+
+static bool sr_ctx_push(sr_jsonpath_ctx_t *c) {
+    if (c->count == c->cap) {
+        int ncap = c->cap ? c->cap * 2 : 64;
+        sr_struct_match_t *ni = safe_realloc(c->items, sizeof(sr_struct_match_t) * (size_t)ncap);
+        if (!ni) {
+            return false;
+        }
+        c->items = ni;
+        c->cap = ncap;
+    }
+    memset(&c->items[c->count], 0, sizeof(sr_struct_match_t));
+    c->count++;
+    return true;
+}
+
+static void sr_emit_structural_match(sr_jsonpath_ctx_t *c, const char *json_path, const char *key,
+                                     yyjson_val *val) {
+    if (!sr_ctx_push(c)) {
+        return;
+    }
+    sr_struct_match_t *m = &c->items[c->count - 1];
+    m->file_path = heap_strdup(c->cur_file ? c->cur_file : "");
+    m->json_path = heap_strdup(json_path ? json_path : "");
+    m->key = heap_strdup(key ? key : "");
+    char *value_str = yyjson_val_write(val, 0, NULL);
+    m->value = value_str ? heap_strdup(value_str) : heap_strdup("");
+    free(value_str);
+    m->value_type = sr_json_type_name(val);
+
+    int start_line = sr_find_key_line(c, key, m->value);
+    int end_line = start_line;
+    if (m->value) {
+        for (const char *q = m->value; *q; q++) {
+            if (*q == '\n') {
+                end_line++;
+            }
+        }
+    }
+    m->start_line = start_line;
+    m->end_line = end_line;
+}
+
+static void sr_ctx_free(sr_jsonpath_ctx_t *c) {
+    for (int i = 0; i < c->count; i++) {
+        free(c->items[i].file_path);
+        free(c->items[i].json_path);
+        free(c->items[i].key);
+        free(c->items[i].value);
+    }
+    free(c->items);
+    c->items = NULL;
+    c->count = c->cap = 0;
+}
+
+/* Recursively evaluate a JSONPath against a yyjson value. `remaining` is the
+ * unparsed tail of the query starting at the current segment. A segment is one
+ * of: a plain key, `*` (all keys/indices), `key[*]` (expand array/object under
+ * key), or `key[n]` (index n). Segments are separated by '.'. */
+static void sr_jsonpath_step(yyjson_val *val, const char *path, const char *remaining,
+                             sr_jsonpath_ctx_t *c);
+
+static void sr_jsonpath_expand(yyjson_val *val, const char *path, const char *remaining,
+                               sr_jsonpath_ctx_t *c) {
+    yyjson_type t = yyjson_get_type(val);
+    if (t == YYJSON_TYPE_OBJ) {
+        yyjson_obj_iter it = yyjson_obj_iter_with(val);
+        yyjson_val *key;
+        while ((key = yyjson_obj_iter_next(&it)) != NULL) {
+            yyjson_val *v = yyjson_obj_iter_get_val(key);
+            const char *k = yyjson_get_str(key);
+            if (!k) {
+                continue;
+            }
+            char child_path[CBM_SZ_1K];
+            snprintf(child_path, sizeof(child_path), "%s.%s", path, k);
+            sr_jsonpath_step(v, child_path, remaining, c);
+        }
+    } else if (t == YYJSON_TYPE_ARR) {
+        size_t n = yyjson_arr_size(val);
+        for (size_t i = 0; i < n; i++) {
+            yyjson_val *v = yyjson_arr_get(val, (uint32_t)i);
+            char child_path[CBM_SZ_1K];
+            snprintf(child_path, sizeof(child_path), "%s[%zu]", path, i);
+            sr_jsonpath_step(v, child_path, remaining, c);
+        }
+    }
+}
+
+static void sr_jsonpath_step(yyjson_val *val, const char *path, const char *remaining,
+                             sr_jsonpath_ctx_t *c) {
+    if (!remaining || !remaining[0]) {
+        /* Terminal: emit this value. Display key = last path component (minus any
+         * array index suffix). */
+        const char *kp = strrchr(path, '.');
+        kp = kp ? kp + 1 : path + 1; /* skip leading '$' */
+        const char *br = strchr(kp, '[');
+        char kbuf[CBM_SZ_256];
+        const char *key = kp;
+        if (br) {
+            size_t kl = (size_t)(br - kp);
+            if (kl >= sizeof(kbuf)) {
+                kl = sizeof(kbuf) - 1;
+            }
+            memcpy(kbuf, kp, kl);
+            kbuf[kl] = '\0';
+            key = kbuf;
+        }
+        sr_emit_structural_match(c, path, key, val);
+        return;
+    }
+
+    /* Parse one segment: head (up to '.', or '['), optional '[sel]', then '.'. */
+    char head[CBM_SZ_256];
+    const char *p = remaining;
+    size_t hi = 0;
+    while (*p && *p != '.' && *p != '[' && hi < sizeof(head) - 1) {
+        head[hi++] = *p++;
+    }
+    head[hi] = '\0';
+
+    const char *sel_start = NULL;
+    const char *sel_end = NULL;
+    if (*p == '[') {
+        const char *cl = strchr(p, ']');
+        if (!cl) {
+            return; /* malformed */
+        }
+        sel_start = p + 1;
+        sel_end = cl;
+        p = cl + 1;
+    }
+
+    const char *next_rem = p;
+    if (*p == '.') {
+        next_rem = p + 1;
+    } else if (*p == '\0') {
+        next_rem = p;
+    }
+
+    bool wildcard = strcmp(head, "*") == 0;
+
+    if (wildcard && !sel_start) {
+        sr_jsonpath_expand(val, path, next_rem, c);
+        return;
+    }
+
+    yyjson_val *child = NULL;
+    char child_path[CBM_SZ_1K];
+    if (wildcard) {
+        child = val;
+        snprintf(child_path, sizeof(child_path), "%s", path);
+    } else {
+        if (yyjson_get_type(val) != YYJSON_TYPE_OBJ) {
+            return;
+        }
+        child = yyjson_obj_get(val, head);
+        if (!child) {
+            return;
+        }
+        snprintf(child_path, sizeof(child_path), "%s.%s", path, head);
+    }
+
+    if (sel_start) {
+        size_t slen = (size_t)(sel_end - sel_start);
+        if (slen == 1 && sel_start[0] == '*') {
+            sr_jsonpath_expand(child, child_path, next_rem, c);
+        } else if (slen > 0) {
+            int idx = atoi(sel_start);
+            if (yyjson_get_type(child) == YYJSON_TYPE_ARR) {
+                yyjson_val *elem = yyjson_arr_get(child, (uint32_t)idx);
+                if (elem) {
+                    char ip[CBM_SZ_1K];
+                    snprintf(ip, sizeof(ip), "%s[%d]", child_path, idx);
+                    sr_jsonpath_step(elem, ip, next_rem, c);
+                }
+            }
+        }
+    } else {
+        sr_jsonpath_step(child, child_path, next_rem, c);
+    }
+}
+
+/* Parse the JSONPath query (must begin with '$') and return the first segment
+ * pointer (just past '$' and any leading '.'). */
+static const char *sr_jsonpath_start(const char *query) {
+    if (!query || query[0] != '$') {
+        return NULL;
+    }
+    const char *p = query + 1;
+    if (*p == '.') {
+        p++;
+    }
+    return p;
+}
+
+/* ── search_resources handler ───────────────────────────────────── */
+static char *handle_search_resources(cbm_mcp_server_t *srv, const char *args) {
+    char *query = cbm_mcp_get_string_arg(args, "query");
+    char *mode_str = cbm_mcp_get_string_arg(args, "mode");
+    char *file_pattern = cbm_mcp_get_string_arg(args, "file_pattern");
+    char *file_path = cbm_mcp_get_string_arg(args, "file_path");
+    char *project = get_project_arg(args);
+    char *repo_path = cbm_mcp_get_string_arg(args, "repo_path");
+    int limit = cbm_mcp_get_int_arg(args, "limit", SR_DEFAULT_LIMIT);
+    int offset = cbm_mcp_get_int_arg(args, "offset", 0);
+    int context_lines = cbm_mcp_get_int_arg(args, "context_lines", SR_DEFAULT_CONTEXT);
+    bool use_regex = cbm_mcp_get_bool_arg(args, "regex");
+    uint64_t t0 = cbm_now_ms();
+
+    bool structural = mode_str && strcmp(mode_str, "structural") == 0;
+    free(mode_str);
+
+    if (limit <= 0 || limit > SR_HARD_LIMIT) {
+        limit = SR_DEFAULT_LIMIT;
+    }
+    if (offset < 0) {
+        offset = 0;
+    }
+    if (context_lines < 0) {
+        context_lines = 0;
+    }
+    if (context_lines > 20) {
+        context_lines = 20;
+    }
+    cbm_normalize_path_sep(file_path);
+    cbm_normalize_path_sep(file_pattern);
+    cbm_normalize_path_sep(repo_path);
+
+    if (!query || !query[0]) {
+        free(query);
+        free(file_pattern);
+        free(file_path);
+        free(project);
+        free(repo_path);
+        return cbm_mcp_text_result("query is required", true);
+    }
+
+    /* Resolve root: prefer repo_path (works for non-indexed repos); else project
+     * (indexed). search_resources deliberately supports repos that have NOT been
+     * indexed — that is its purpose for data/skip-list files. */
+    char *root_path = NULL;
+    if (repo_path && repo_path[0]) {
+        if (sr_path_has_traversal(repo_path) || !validate_search_path_arg(repo_path)) {
+            free(query);
+            free(file_pattern);
+            free(file_path);
+            free(project);
+            free(repo_path);
+            return cbm_mcp_text_result("repo_path contains invalid characters or '..'", true);
+        }
+        root_path = canonicalize_repo_path_if_exists(repo_path);
+        /* canonicalize_repo_path_if_exists frees the original repo_path when it
+         * returns a new canonical string; just drop our reference either way. */
+        repo_path = NULL;
+    } else if (project) {
+        root_path = get_project_root(srv, project);
+    }
+    if (!root_path) {
+        free(query);
+        free(file_pattern);
+        free(file_path);
+        free(project);
+        free(repo_path);
+        char *e = build_project_list_error(
+            "project not found or not indexed; pass repo_path to search a non-indexed repo");
+        char *r = cbm_mcp_text_result(e, true);
+        free(e);
+        return r;
+    }
+
+    /* Validate user-supplied relative paths/globs: no shell metachars, no '..'. */
+    if ((file_path && (sr_path_has_traversal(file_path) || !validate_search_path_arg(file_path))) ||
+        (file_pattern &&
+         (sr_path_has_traversal(file_pattern) || !validate_search_path_arg(file_pattern)))) {
+        free(root_path);
+        free(query);
+        free(file_pattern);
+        free(file_path);
+        free(project);
+        free(repo_path);
+        return cbm_mcp_text_result("file_path/file_pattern contains invalid characters or '..'",
+                                   true);
+    }
+
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val *root_obj = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root_obj);
+    yyjson_mut_val *text_arr = yyjson_mut_arr(doc);
+    yyjson_mut_val *struct_arr = yyjson_mut_arr(doc);
+
+    /* Collect target files. */
+    sr_pathlist_t targets = {0};
+    int files_seen = 0;
+    int files_scanned = 0;
+    int total = 0;
+    int emitted = 0;
+    bool has_more = false;
+    bool code_rejected = false;
+    bool structural_non_json = false;
+
+    if (file_path && file_path[0]) {
+        /* Single-file mode. Resolve and scope-check. */
+        char abs[CBM_SZ_4K];
+        snprintf(abs, sizeof(abs), "%s/%s", root_path, file_path);
+        if (!cbm_path_within_root(root_path, abs)) {
+            yyjson_mut_doc_free(doc);
+            free(root_path);
+            free(query);
+            free(file_pattern);
+            free(file_path);
+            free(project);
+            free(repo_path);
+            return cbm_mcp_text_result("file_path is outside the project root", true);
+        }
+        const char *base = strrchr(file_path, '/');
+        base = base ? base + 1 : file_path;
+        if (!sr_is_resource_ext(base)) {
+            code_rejected = true;
+        } else {
+            sr_pathlist_push(&targets, file_path);
+        }
+    } else {
+        sr_walk_resources(root_path, "", &targets, file_pattern, &files_seen);
+    }
+
+    sr_jsonpath_ctx_t gctx = {0};
+
+    for (int fi = 0; fi < targets.count && emitted < limit; fi++) {
+        const char *rel = targets.paths[fi];
+        char abs[CBM_SZ_4K];
+        snprintf(abs, sizeof(abs), "%s/%s", root_path, rel);
+        if (!cbm_path_within_root(root_path, abs)) {
+            continue;
+        }
+        files_scanned++;
+
+        if (structural) {
+            if (!sr_is_json_ext(rel)) {
+                structural_non_json = true;
+                continue;
+            }
+            size_t flen = 0;
+            char *buf = sr_read_file_capped(abs, SR_MAX_FILE_BYTES_STRUCT, &flen);
+            if (!buf) {
+                continue;
+            }
+            yyjson_doc *jdoc = yyjson_read(buf, flen, 0);
+            if (jdoc) {
+                yyjson_val *jroot = yyjson_doc_get_root(jdoc);
+                int nlines = 0;
+                sr_line_t *lines = sr_build_lines(buf, flen, &nlines);
+                gctx.buf = buf;
+                gctx.lines = lines;
+                gctx.nlines = nlines;
+                gctx.key_cursor = 0;
+                gctx.cur_file = rel;
+                const char *first_seg = sr_jsonpath_start(query);
+                if (first_seg) {
+                    if (first_seg[0]) {
+                        sr_jsonpath_step(jroot, "$", first_seg, &gctx);
+                    } else {
+                        sr_emit_structural_match(&gctx, "$", NULL, jroot);
+                    }
+                }
+                free(lines);
+                yyjson_doc_free(jdoc);
+            }
+            free(buf);
+            continue;
+        }
+
+        /* text mode */
+        size_t flen = 0;
+        char *buf = sr_read_file_capped(abs, SR_MAX_FILE_BYTES_TEXT, &flen);
+        if (!buf) {
+            continue;
+        }
+        int nlines = 0;
+        sr_line_t *lines = sr_build_lines(buf, flen, &nlines);
+        if (!lines) {
+            free(buf);
+            continue;
+        }
+        cbm_regex_t re;
+        bool have_re = false;
+        if (use_regex) {
+            if (cbm_regcomp(&re, query, CBM_REG_EXTENDED) == CBM_REG_OK) {
+                have_re = true;
+            }
+        }
+        int per_file = 0;
+        for (int li = 0; li < nlines && per_file < SR_MAX_MATCHES_PER_FILE; li++) {
+            char *line_text = sr_line_text(buf, &lines[li]);
+            if (!line_text) {
+                continue;
+            }
+            int col = 0;
+            if (have_re) {
+                cbm_regmatch_t m;
+                if (cbm_regexec(&re, line_text, 1, &m, 0) == CBM_REG_OK) {
+                    col = m.rm_so + 1;
+                }
+            } else {
+                const char *hit = strstr(line_text, query);
+                if (hit) {
+                    col = (int)(hit - line_text) + 1;
+                }
+            }
+            if (col > 0) {
+                per_file++;
+                if (total >= offset && emitted < limit) {
+                    yyjson_mut_val *item = yyjson_mut_obj(doc);
+                    yyjson_mut_obj_add_str(doc, item, "file_path", rel);
+                    yyjson_mut_obj_add_int(doc, item, "line", li + 1);
+                    yyjson_mut_obj_add_int(doc, item, "column", col);
+                    yyjson_mut_obj_add_strcpy(doc, item, "line_text", line_text);
+                    yyjson_mut_val *ctx_arr = yyjson_mut_arr(doc);
+                    int lo = li - context_lines;
+                    int hi = li + context_lines;
+                    if (lo < 0) {
+                        lo = 0;
+                    }
+                    if (hi >= nlines) {
+                        hi = nlines - 1;
+                    }
+                    for (int cl = lo; cl <= hi; cl++) {
+                        if (cl == li) {
+                            continue;
+                        }
+                        char *ct = sr_line_text(buf, &lines[cl]);
+                        if (!ct) {
+                            continue;
+                        }
+                        yyjson_mut_val *co = yyjson_mut_obj(doc);
+                        yyjson_mut_obj_add_int(doc, co, "line", cl + 1);
+                        yyjson_mut_obj_add_strcpy(doc, co, "text", ct);
+                        yyjson_mut_arr_add_val(ctx_arr, co);
+                        free(ct);
+                    }
+                    yyjson_mut_obj_add_val(doc, item, "context", ctx_arr);
+                    yyjson_mut_arr_add_val(text_arr, item);
+                    emitted++;
+                } else if (emitted >= limit) {
+                    has_more = true;
+                }
+                total++;
+            }
+            free(line_text);
+        }
+        if (have_re) {
+            cbm_regfree(&re);
+        }
+        free(lines);
+        free(buf);
+    }
+
+    /* Structural mode: emit only the [offset, offset+limit) window from the
+     * collected records. total is the full match count across all files. */
+    if (structural) {
+        total = gctx.count;
+        int start = offset;
+        if (start > total) {
+            start = total;
+        }
+        int end = start + limit;
+        if (end > total) {
+            end = total;
+        }
+        emitted = end - start;
+        has_more = (offset + emitted) < total;
+        for (int i = start; i < end; i++) {
+            sr_struct_match_t *m = &gctx.items[i];
+            yyjson_mut_val *item = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, item, "file_path", m->file_path);
+            yyjson_mut_obj_add_strcpy(doc, item, "json_path", m->json_path);
+            yyjson_mut_obj_add_strcpy(doc, item, "key", m->key);
+            yyjson_mut_obj_add_strcpy(doc, item, "value", m->value);
+            yyjson_mut_obj_add_str(doc, item, "value_type", m->value_type);
+            yyjson_mut_obj_add_int(doc, item, "start_line", m->start_line);
+            yyjson_mut_obj_add_int(doc, item, "end_line", m->end_line);
+            yyjson_mut_arr_add_val(struct_arr, item);
+        }
+    }
+
+    yyjson_mut_obj_add_str(doc, root_obj, "mode", structural ? "structural" : "text");
+    yyjson_mut_obj_add_int(doc, root_obj, "total", total);
+    yyjson_mut_obj_add_int(doc, root_obj, "returned", emitted);
+    yyjson_mut_obj_add_bool(doc, root_obj, "has_more", has_more);
+    yyjson_mut_obj_add_int(doc, root_obj, "files_scanned", files_scanned);
+    yyjson_mut_obj_add_int(doc, root_obj, "offset", offset);
+    yyjson_mut_obj_add_int(doc, root_obj, "limit", limit);
+    yyjson_mut_obj_add_int(doc, root_obj, "elapsed_ms", (int)(cbm_now_ms() - t0));
+
+    if (structural) {
+        yyjson_mut_obj_add_val(doc, root_obj, "structural_matches", struct_arr);
+    } else {
+        yyjson_mut_obj_add_val(doc, root_obj, "matches", text_arr);
+    }
+
+    yyjson_mut_val *warnings = yyjson_mut_arr(doc);
+    if (code_rejected) {
+        yyjson_mut_arr_add_str(
+            doc, warnings,
+            "file_path is not a resource/data file; for code files use search_code");
+    }
+    if (structural_non_json) {
+        yyjson_mut_arr_add_str(
+            doc, warnings,
+            "structural mode supports JSON only; YAML/CSV/INI/TOML skipped (use mode=text)");
+    }
+    if (files_seen > SR_MAX_FILES_SCAN) {
+        yyjson_mut_arr_add_str(doc, warnings, "file scan cap reached; narrow with file_pattern");
+    }
+    yyjson_mut_obj_add_val(doc, root_obj, "warnings", warnings);
+
+    char *json = yy_doc_to_str(doc);
+    yyjson_mut_doc_free(doc);
+    sr_ctx_free(&gctx);
+    sr_pathlist_free(&targets);
+    free(root_path);
+    free(query);
+    free(file_pattern);
+    free(file_path);
+    free(project);
+    free(repo_path);
+
+    char *result = cbm_mcp_text_result(json, false);
+    free(json);
+    return result;
+}
+
 /* ── detect_changes ───────────────────────────────────────────── */
 
 /* Find symbols defined in a file and add them to the impacted array. */
@@ -6296,6 +7255,9 @@ char *cbm_mcp_handle_tool(cbm_mcp_server_t *srv, const char *tool_name, const ch
     }
     if (strcmp(tool_name, "search_code") == 0) {
         return handle_search_code(srv, args_json);
+    }
+    if (strcmp(tool_name, "search_resources") == 0) {
+        return handle_search_resources(srv, args_json);
     }
     if (strcmp(tool_name, "detect_changes") == 0) {
         return handle_detect_changes(srv, args_json);

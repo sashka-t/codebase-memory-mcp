@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static char *read_all(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
@@ -122,9 +124,59 @@ TEST(parse_dir_merges_xml_files) {
     PASS();
 }
 
+TEST(parse_dir_skips_malformed_file) {
+    /* A single corrupt/non-JUnit XML must not abort the whole dir ingest;
+     * the good file's suites should still come through. */
+    char tmpl[] = "/tmp/cbm-junit-skip-XXXXXX";
+    ASSERT(mkdtemp(tmpl));
+    char good[256], bad[256];
+    snprintf(good, sizeof(good), "%s/TEST-good.xml", tmpl);
+    snprintf(bad, sizeof(bad), "%s/TEST-bad.xml", tmpl);
+    const char *good_xml =
+        "<?xml version=\"1.0\"?>\n<testsuite name=\"ok.Suite\" tests=\"1\">"
+        "<testcase classname=\"ok.Suite\" name=\"okCase\"/></testsuite>\n";
+    FILE *f = fopen(good, "wb");
+    ASSERT(f);
+    fputs(good_xml, f);
+    fclose(f);
+    FILE *b = fopen(bad, "wb");
+    ASSERT(b);
+    fputs("not xml <<<<", b);
+    fclose(b);
+    cbm_test_result_t *r = cbm_parse_junit_xml_dir(tmpl);
+    ASSERT(r);
+    ASSERT_EQ((long long)r->suite_count, 1);
+    ASSERT_STR_EQ(r->suites[0].name, "ok.Suite");
+    cbm_test_result_free(r);
+    remove(good);
+    remove(bad);
+    remove(tmpl);
+    PASS();
+}
+
+TEST(parse_dir_all_malformed_returns_null) {
+    /* When report files exist but none parse, surface an error (NULL) rather
+     * than a silently empty success. */
+    char tmpl[] = "/tmp/cbm-junit-allbad-XXXXXX";
+    ASSERT(mkdtemp(tmpl));
+    char bad[256];
+    snprintf(bad, sizeof(bad), "%s/TEST-bad.xml", tmpl);
+    FILE *b = fopen(bad, "wb");
+    ASSERT(b);
+    fputs("not xml <<<<", b);
+    fclose(b);
+    cbm_test_result_t *r = cbm_parse_junit_xml_dir(tmpl);
+    ASSERT_NULL(r);
+    remove(bad);
+    remove(tmpl);
+    PASS();
+}
+
 SUITE(junit_xml) {
     RUN_TEST(parse_mixed);
     RUN_TEST(parse_bare_testsuite_root);
     RUN_TEST(parse_malformed_returns_null);
     RUN_TEST(parse_dir_merges_xml_files);
+    RUN_TEST(parse_dir_skips_malformed_file);
+    RUN_TEST(parse_dir_all_malformed_returns_null);
 }

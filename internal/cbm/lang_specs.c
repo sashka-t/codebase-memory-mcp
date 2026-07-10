@@ -417,7 +417,10 @@ static const char *scala_func_types[] = {"function_definition", "function_declar
                                          "lambda_expression", NULL};
 static const char *scala_class_types[] = {"class_definition", "object_definition",
                                           "trait_definition", "enum_definition",
-                                          "type_definition",  NULL};
+                                          "type_definition",
+                                          "given_definition",     /* Scala 3: given instance */
+                                          "extension_definition", /* Scala 3: extension block */
+                                          NULL};
 static const char *scala_module_types[] = {"compilation_unit", NULL};
 static const char *scala_call_types[] = {"call_expression",     "generic_function",
                                          "field_expression",    "infix_expression",

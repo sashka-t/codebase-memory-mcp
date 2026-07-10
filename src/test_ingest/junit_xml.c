@@ -531,6 +531,7 @@ cbm_test_result_t *cbm_parse_junit_xml_dir(const char *dir) {
 
     qsort(names, ncount, sizeof(names[0]), cmp_str);
 
+    int parsed = 0;
     for (size_t i = 0; i < ncount; i++) {
         char path[4096];
         snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
@@ -544,10 +545,12 @@ cbm_test_result_t *cbm_parse_junit_xml_dir(const char *dir) {
         cbm_test_result_t *part = cbm_parse_junit_xml(xml, len);
         free(xml);
         if (!part) {
-            free(names);
-            cbm_test_result_free(acc);
-            return NULL;
+            /* Skip unparseable files (corrupt or non-JUnit XML) so a single bad
+             * report does not abort the whole ingest. If every file fails we
+             * still return NULL after the loop to surface the error. */
+            continue;
         }
+        parsed++;
         for (size_t si = 0; si < part->suite_count; si++) {
             cbm_test_suite_t su = part->suites[si];
             memset(&part->suites[si], 0, sizeof(part->suites[si]));
@@ -567,6 +570,13 @@ cbm_test_result_t *cbm_parse_junit_xml_dir(const char *dir) {
         free(part);
     }
     free(names);
+
+    /* ncount == 0 returned early above; reaching here with parsed == 0 means
+     * report files existed but none could be parsed — surface as an error. */
+    if (parsed == 0) {
+        cbm_test_result_free(acc);
+        return NULL;
+    }
 
     cbm_test_result_recompute_stats(acc);
     return acc;

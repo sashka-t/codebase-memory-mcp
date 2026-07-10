@@ -190,6 +190,8 @@ static void extract_class_fields(CBMExtractCtx *ctx, TSNode class_node, const ch
 static TSNode find_class_body(TSNode class_node, CBMLanguage lang);
 static void extract_enum_members(CBMExtractCtx *ctx, TSNode node, const char *class_qn);
 static void extract_elixir_call(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec);
+static const char *extract_c_declarator_name(CBMArena *a, TSNode decl, const char *source);
+static TSNode resolve_kotlin_var_name(TSNode node);
 
 // --- Helpers ---
 
@@ -4193,6 +4195,75 @@ static void extract_objc_impl_methods(CBMExtractCtx *ctx, TSNode impl_node, cons
     }
 }
 
+// Mint a class/object member val/var/property as a class-scoped "Field"
+// definition. Mirrors extract_vars_jvm name resolution but emits a Field scoped
+// to the enclosing class QN (not a file-scope Variable). extract_variables only
+// walks file top-level, so member val/lazy val/property declarations inside an
+// object/class/trait would otherwise be absent from the graph. JVM-only
+// (Scala/Kotlin/Groovy); C/C++/Java/Rust fields are handled by extract_class_fields.
+static void push_class_field_def(CBMExtractCtx *ctx, TSNode node, const char *class_qn,
+                                 const CBMLangSpec *spec) {
+    (void)spec;
+    CBMArena *a = ctx->arena;
+    const char *name = NULL;
+    TSNode name_node = {0};
+    TSNode type_node = ts_node_child_by_field_name(node, TS_FIELD("type"));
+
+    switch (ctx->language) {
+    case CBM_LANG_SCALA: {
+        TSNode pattern = ts_node_child_by_field_name(node, TS_FIELD("pattern"));
+        if (!ts_node_is_null(pattern)) {
+            name_node = pattern;
+        } else {
+            name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
+        }
+        break;
+    }
+    case CBM_LANG_KOTLIN:
+        name_node = resolve_kotlin_var_name(node);
+        break;
+    case CBM_LANG_GROOVY:
+        name_node = ts_node_child_by_field_name(node, TS_FIELD("name"));
+        if (ts_node_is_null(name_node)) {
+            const char *cname = extract_c_declarator_name(a, node, ctx->source);
+            if (cname && cname[0]) {
+                name = cname;
+            } else {
+                name_node = cbm_find_child_by_kind(node, "identifier");
+            }
+        }
+        break;
+    default:
+        return;
+    }
+
+    if (!name) {
+        if (ts_node_is_null(name_node)) {
+            return;
+        }
+        name = cbm_node_text(a, name_node, ctx->source);
+    }
+    if (!name || !name[0] || strcmp(name, "_") == 0) {
+        return;
+    }
+
+    CBMDefinition def;
+    memset(&def, 0, sizeof(def));
+    def.name = name;
+    def.qualified_name = cbm_arena_sprintf(a, "%s.%s", class_qn, name);
+    def.label = "Field";
+    def.file_path = ctx->rel_path;
+    def.parent_class = class_qn;
+    if (!ts_node_is_null(type_node)) {
+        def.return_type = cbm_node_text(a, type_node, ctx->source);
+    }
+    def.start_line = ts_node_start_point(node).row + TS_LINE_OFFSET;
+    def.end_line = ts_node_end_point(node).row + TS_LINE_OFFSET;
+    def.is_exported = cbm_is_exported(name, ctx->language);
+    compute_fingerprint(ctx, &def, node);
+    cbm_defs_push(&ctx->result->defs, a, def);
+}
+
 // Extract methods inside a class body
 static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const char *class_qn,
                                   const CBMLangSpec *spec) {
@@ -4252,6 +4323,36 @@ static void extract_class_methods(CBMExtractCtx *ctx, TSNode class_node, const c
             }
             push_method_def(ctx, value, class_node, class_qn, spec, fname);
             continue;
+        }
+
+        /* JVM (Scala/Kotlin/Groovy) class/object member val/var/property: these
+         * are variable_node_types, not function_node_types, so the method path
+         * below skips them. extract_variables only walks file top-level, so
+         * member val/lazy val/property inside an object/class/trait would
+         * otherwise be absent from the graph. Mint them as class-scoped Field
+         * defs. Peek through declaration/template_declaration wrappers the same
+         * way push_nested_class_nodes descends them. */
+        if (ctx->language == CBM_LANG_SCALA || ctx->language == CBM_LANG_KOTLIN ||
+            ctx->language == CBM_LANG_GROOVY) {
+            TSNode var_node = child;
+            if (!cbm_kind_in_set(var_node, spec->variable_node_types)) {
+                const char *wck = ts_node_type(child);
+                if (strcmp(wck, "declaration") == 0 ||
+                    strcmp(wck, "template_declaration") == 0) {
+                    uint32_t wnc = ts_node_named_child_count(child);
+                    for (uint32_t w = 0; w < wnc; w++) {
+                        TSNode inner = ts_node_named_child(child, w);
+                        if (cbm_kind_in_set(inner, spec->variable_node_types)) {
+                            var_node = inner;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (cbm_kind_in_set(var_node, spec->variable_node_types)) {
+                push_class_field_def(ctx, var_node, class_qn, spec);
+                continue;
+            }
         }
 
         if (!cbm_kind_in_set(method_node, spec->function_node_types)) {

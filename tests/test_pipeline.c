@@ -2222,6 +2222,119 @@ TEST(pipeline_kotlin_project) {
     PASS();
 }
 
+TEST(pipeline_jvm_member_fields) {
+    /* JVM class/object member val/var/property must surface as class-scoped
+     * "Field" defs. extract_variables only walks file top-level, and
+     * extract_class_methods previously minted only methods, so member
+     * val/lazy val/property (e.g. a cached `val BolCompanyIdsCached`) was
+     * dropped. Covers Scala/Kotlin/Groovy. */
+    const char *files[] = {"Foo.scala", "Order.kt", "Box.groovy"};
+    const char *contents[] = {
+        "object Foo {\n"
+        "  lazy val BolCompanyIdsCached: Int = 42\n"
+        "  val x: Int = 1\n"
+        "  var y: Int = 0\n"
+        "  def m(): Int = x\n"
+        "}\n",
+        "class Order {\n"
+        "    val apiKey: String = \"k\"\n"
+        "    var count: Int = 0\n"
+        "    fun process(): Boolean = true\n"
+        "}\n",
+        "class Box {\n"
+        "    def name = \"x\"\n"
+        "    int count = 0\n"
+        "}\n"};
+
+    if (setup_lang_repo(files, contents, 3) != 0)
+        FAIL("tmpdir");
+    char db[512];
+    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
+
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+
+    cbm_store_t *s = cbm_store_open_path(db);
+    ASSERT_NOT_NULL(s);
+    const char *proj = cbm_pipeline_project_name(p);
+
+    cbm_node_t *fields = NULL;
+    int fc = 0;
+    cbm_store_find_nodes_by_label(s, proj, "Field", &fields, &fc);
+    ASSERT_GTE(fc, 5); /* Scala: BolCompanyIdsCached,x,y | Kotlin: apiKey,count | Groovy: name,count */
+
+    /* Class-scoped QN: each Field qualified_name must end with ".<member>". */
+    int found_bol = 0, found_x = 0, found_apikey = 0, found_groovy_name = 0;
+    for (int i = 0; i < fc; i++) {
+        const char *qn = fields[i].qualified_name ? fields[i].qualified_name : "";
+        const char *nm = fields[i].name ? fields[i].name : "";
+        if (strcmp(nm, "BolCompanyIdsCached") == 0 && strstr(qn, ".BolCompanyIdsCached"))
+            found_bol = 1;
+        else if (strcmp(nm, "x") == 0 && strstr(qn, ".x"))
+            found_x = 1;
+        else if (strcmp(nm, "apiKey") == 0 && strstr(qn, ".apiKey"))
+            found_apikey = 1;
+        else if (strcmp(nm, "name") == 0 && strstr(qn, ".name"))
+            found_groovy_name = 1;
+    }
+    ASSERT_TRUE(found_bol);
+    ASSERT_TRUE(found_x);
+    ASSERT_TRUE(found_apikey);
+    ASSERT_TRUE(found_groovy_name);
+
+    cbm_store_free_nodes(fields, fc);
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    PASS();
+}
+
+TEST(pipeline_scala3_given_extension) {
+    /* Scala 3 `given_definition` / `extension_definition` must surface as
+     * Definition nodes (previously absent from scala_class_types). The pipeline
+     * must not crash on these constructs. */
+    const char *files[] = {"GivenExt.scala"};
+    const char *contents[] = {
+        "trait Eq[A] { def eqv(a: A, b: A): Boolean }\n\n"
+        "given gEq: Eq[Int] = new Eq[Int] {\n"
+        "  def eqv(a: Int, b: Int): Boolean = a == b\n"
+        "}\n\n"
+        "extension (x: Int) def doubled: Int = x * 2\n"};
+
+    if (setup_lang_repo(files, contents, 1) != 0)
+        FAIL("tmpdir");
+    char db[512];
+    snprintf(db, sizeof(db), "%s/test.db", g_lang_tmpdir);
+
+    cbm_pipeline_t *p = cbm_pipeline_new(g_lang_tmpdir, db, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+
+    cbm_store_t *s = cbm_store_open_path(db);
+    ASSERT_NOT_NULL(s);
+    const char *proj = cbm_pipeline_project_name(p);
+
+    /* given gEq must surface as some Definition (Class label via class_types). */
+    cbm_node_t *found = NULL;
+    int fnc = 0;
+    cbm_store_find_nodes_by_name(s, proj, "gEq", &found, &fnc);
+    ASSERT_GT(fnc, 0);
+    cbm_store_free_nodes(found, fnc);
+
+    /* extension method `doubled` should be extracted (best-effort). */
+    cbm_node_t *doubled = NULL;
+    int dnc = 0;
+    cbm_store_find_nodes_by_name(s, proj, "doubled", &doubled, &dnc);
+    ASSERT_GT(dnc, 0);
+    cbm_store_free_nodes(doubled, dnc);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    teardown_lang_repo();
+    PASS();
+}
+
 TEST(pipeline_lua_anonymous_functions) {
     /* Port of TestLuaAnonymousFunctionExtraction */
     const char *files[] = {"app.lua"};
@@ -6760,6 +6873,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_go_type_classification);
     RUN_TEST(pipeline_go_grouped_types);
     RUN_TEST(pipeline_kotlin_project);
+    RUN_TEST(pipeline_jvm_member_fields);
+    RUN_TEST(pipeline_scala3_given_extension);
     RUN_TEST(pipeline_lua_anonymous_functions);
     RUN_TEST(pipeline_csharp_modern);
     RUN_TEST(pipeline_bom_stripping);
