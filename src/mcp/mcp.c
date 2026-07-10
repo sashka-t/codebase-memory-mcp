@@ -26,6 +26,7 @@ enum {
     MCP_DEFAULT_DEPTH = 3,
     MCP_DEFAULT_BFS_DEPTH = 2,
     MCP_DEFAULT_LIMIT = 10,
+    MCP_MAX_DEPTH = 15,
     MCP_BFS_LIMIT = 100,
     MCP_N_DEFAULTS_2 = 2,
     MCP_URI_PREFIX = 7,      /* strlen("file://") */
@@ -551,7 +552,7 @@ static const tool_def_t TOOLS[] = {
      "\"count\":{\"type\":\"integer\"}},\"additionalProperties\":false}},\"project\":{\"type\":"
      "\"string\"}},\"required\":[\"traces\",\"project\"]}"},
 
-    {"run_tests",
+    {"run_tests", "Run tests",
      "Run a whitelisted test command (gradle, ./gradlew, mvn, go test, pytest, sbt), parse "
      "results into a knowledge graph, and return a summary. Set run_id or persist=true to keep "
      "results for follow-up queries.",
@@ -567,7 +568,7 @@ static const tool_def_t TOOLS[] = {
      "\"timeout_seconds\":{\"type\":\"integer\",\"description\":\"Kill runner after N seconds. Default 600.\"}"
      "},\"required\":[\"command\",\"cwd\"]}"},
 
-    {"ingest_test_reports",
+    {"ingest_test_reports", "Ingest test reports",
      "Parse existing JUnit XML test reports from disk (Gradle/Maven/sbt/IntelliJ). Auto-scans "
      "standard directories under cwd (including Gradle submodules) unless report_dir is set.",
      "{\"type\":\"object\",\"properties\":{"
@@ -579,7 +580,7 @@ static const tool_def_t TOOLS[] = {
      "\"format\":{\"type\":\"string\",\"enum\":[\"auto\",\"junit_xml\",\"go_test\",\"pytest\",\"sbt\"]}"
      "},\"required\":[\"cwd\"]}"},
 
-    {"query_test_results",
+    {"query_test_results", "Query test results",
      "Query a persisted test run. Returns matching test cases filtered by status, name, and/or "
      "suite regex.",
      "{\"type\":\"object\",\"properties\":{"
@@ -593,13 +594,13 @@ static const tool_def_t TOOLS[] = {
      "\"offset\":{\"type\":\"integer\"}"
      "},\"required\":[]}"},
 
-    {"list_test_runs",
+    {"list_test_runs", "List test runs",
      "List persistent test runs held in the server session, optionally filtered by project.",
      "{\"type\":\"object\",\"properties\":{"
      "\"project\":{\"type\":\"string\"}"
      "}}"},
 
-    {"trace_test_failures",
+    {"trace_test_failures", "Trace test failures",
      "For each failed/errored test in a run, resolve related production functions via TESTS edges "
      "and return inbound CALLS callers up to depth.",
      "{\"type\":\"object\",\"properties\":{"
@@ -609,7 +610,7 @@ static const tool_def_t TOOLS[] = {
      "\"include_errors\":{\"type\":\"boolean\",\"description\":\"Include status=error. Default true.\"}"
      "},\"required\":[\"run_id\",\"project\"]}"},
 
-    {"ingest_raw_artifact",
+    {"ingest_raw_artifact", "Ingest raw artifact",
      "Store large shell/build/test logs for bounded retrieval. Prefer over pasting logs into "
      "context. Works from MCP and CLI; persisted in ~/.cache/codebase-memory-mcp/_artifacts.db. "
      "Then list_raw_artifacts / search_raw_artifacts / get_raw_artifact.",
@@ -621,14 +622,14 @@ static const tool_def_t TOOLS[] = {
      "\"tags\":{\"type\":\"object\"},\"parse\":{\"type\":\"boolean\"}"
      "},\"required\":[]}"},
 
-    {"list_raw_artifacts",
+    {"list_raw_artifacts", "List raw artifacts",
      "List stored raw artifacts for a project (metadata only, no full content).",
      "{\"type\":\"object\",\"properties\":{"
      "\"project\":{\"type\":\"string\"},\"repo_path\":{\"type\":\"string\"},"
      "\"limit\":{\"type\":\"integer\"},\"offset\":{\"type\":\"integer\"}"
      "},\"required\":[]}"},
 
-    {"get_raw_artifact",
+    {"get_raw_artifact", "Get raw artifact",
      "Read a bounded slice of a stored raw artifact by artifact_id or sha256.",
      "{\"type\":\"object\",\"properties\":{"
      "\"project\":{\"type\":\"string\"},\"repo_path\":{\"type\":\"string\"},"
@@ -637,7 +638,7 @@ static const tool_def_t TOOLS[] = {
      "\"max_bytes\":{\"type\":\"integer\",\"default\":4096}"
      "},\"required\":[]}"},
 
-    {"search_raw_artifacts",
+    {"search_raw_artifacts", "Search raw artifacts",
      "Search within stored raw artifacts. pattern is required (substring match).",
      "{\"type\":\"object\",\"properties\":{"
      "\"project\":{\"type\":\"string\"},\"repo_path\":{\"type\":\"string\"},"

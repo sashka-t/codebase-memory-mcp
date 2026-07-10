@@ -717,9 +717,12 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
         char *new_name = heap_strdup(name);
         char *new_props = properties_json ? heap_strdup(properties_json) : NULL;
         const char *new_label_interned = gb_intern(gb, label);
+        const char *new_file_interned = gb_intern(gb, file_path);
         bool label_changed = !existing->label || !new_label_interned ||
                              strcmp(existing->label, new_label_interned) != 0;
         bool name_changed = !existing->name || !new_name || strcmp(existing->name, new_name) != 0;
+        bool file_changed = !existing->file_path || !new_file_interned ||
+                            strcmp(existing->file_path, new_file_interned) != 0;
         if (label_changed) {
             remove_node_from_ptr_array(
                 cbm_ht_get(gb->nodes_by_label, existing->label ? existing->label : ""),
@@ -729,10 +732,15 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
             remove_node_from_ptr_array(
                 cbm_ht_get(gb->nodes_by_name, existing->name ? existing->name : ""), existing->id);
         }
+        if (file_changed) {
+            remove_node_from_ptr_array(
+                cbm_ht_get(gb->nodes_by_file, existing->file_path ? existing->file_path : ""),
+                existing->id);
+        }
         existing->label = (char *)new_label_interned;
         free(existing->name);
         existing->name = new_name;
-        existing->file_path = (char *)gb_intern(gb, file_path);
+        existing->file_path = (char *)new_file_interned;
         existing->start_line = start_line;
         existing->end_line = end_line;
         if (new_props) {
@@ -748,6 +756,11 @@ int64_t cbm_gbuf_upsert_node(cbm_gbuf_t *gb, const char *label, const char *name
             node_ptr_array_t *by_name =
                 get_or_create_node_array(gb->nodes_by_name, existing->name ? existing->name : "");
             cbm_da_push(by_name, (const cbm_gbuf_node_t *)existing);
+        }
+        if (file_changed) {
+            node_ptr_array_t *by_file = get_or_create_node_array(
+                gb->nodes_by_file, existing->file_path ? existing->file_path : "");
+            cbm_da_push(by_file, (const cbm_gbuf_node_t *)existing);
         }
         return existing->id;
     }
@@ -1293,10 +1306,13 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
              * label/name changes (the old code left the node listed under its
              * original label/name, so find_by_label/name mis-listed it). */
             const char *new_label = gb_intern(dst, sn->label);
+            const char *new_file = gb_intern(dst, sn->file_path);
             bool label_changed =
                 !existing->label || !new_label || strcmp(existing->label, new_label) != 0;
             bool name_changed =
                 !existing->name || !sn->name || strcmp(existing->name, sn->name) != 0;
+            bool file_changed =
+                !existing->file_path || !new_file || strcmp(existing->file_path, new_file) != 0;
             if (label_changed) {
                 remove_node_from_ptr_array(
                     cbm_ht_get(dst->nodes_by_label, existing->label ? existing->label : ""),
@@ -1307,10 +1323,15 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
                     cbm_ht_get(dst->nodes_by_name, existing->name ? existing->name : ""),
                     existing->id);
             }
+            if (file_changed) {
+                remove_node_from_ptr_array(
+                    cbm_ht_get(dst->nodes_by_file, existing->file_path ? existing->file_path : ""),
+                    existing->id);
+            }
             existing->label = (char *)new_label;
             free(existing->name);
             existing->name = heap_strdup(sn->name);
-            existing->file_path = (char *)gb_intern(dst, sn->file_path);
+            existing->file_path = (char *)new_file;
             existing->start_line = sn->start_line;
             existing->end_line = sn->end_line;
             if (sn->properties_json) {
@@ -1326,6 +1347,11 @@ static void merge_update_existing(cbm_gbuf_t *dst, cbm_gbuf_node_t *existing,
                 node_ptr_array_t *by_name = get_or_create_node_array(
                     dst->nodes_by_name, existing->name ? existing->name : "");
                 cbm_da_push(by_name, (const cbm_gbuf_node_t *)existing);
+            }
+            if (file_changed) {
+                node_ptr_array_t *by_file = get_or_create_node_array(
+                    dst->nodes_by_file, existing->file_path ? existing->file_path : "");
+                cbm_da_push(by_file, (const cbm_gbuf_node_t *)existing);
             }
         }
     }

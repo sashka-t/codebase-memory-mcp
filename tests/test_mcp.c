@@ -598,13 +598,25 @@ TEST(server_handle_tools_list_paginates) {
     ASSERT_NULL(strstr(resp, "manage_adr"));
     free(resp);
 
+    /* Page 2 (cursor=8): manage_adr sits here; the tool set spans more
+     * pages, so a nextCursor points at the final page. */
     resp = cbm_mcp_server_handle(
         srv,
         "{\"jsonrpc\":\"2.0\",\"id\":201,\"method\":\"tools/list\",\"params\":{\"cursor\":\"8\"}}");
     ASSERT_NOT_NULL(resp);
     ASSERT_NOT_NULL(strstr(resp, "\"id\":201"));
-    ASSERT_NULL(strstr(resp, "\"nextCursor\""));
+    ASSERT_NOT_NULL(strstr(resp, "\"nextCursor\":\"16\""));
     ASSERT_NOT_NULL(strstr(resp, "manage_adr"));
+    free(resp);
+
+    /* Page 3 (cursor=16): last page — no nextCursor, tail tool present. */
+    resp = cbm_mcp_server_handle(
+        srv,
+        "{\"jsonrpc\":\"2.0\",\"id\":202,\"method\":\"tools/list\",\"params\":{\"cursor\":\"16\"}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "\"id\":202"));
+    ASSERT_NULL(strstr(resp, "\"nextCursor\""));
+    ASSERT_NOT_NULL(strstr(resp, "search_raw_artifacts"));
     free(resp);
 
     cbm_mcp_server_free(srv);
