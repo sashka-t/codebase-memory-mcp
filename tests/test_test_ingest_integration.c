@@ -105,7 +105,6 @@ TEST(ti_ingest_junit_ephemeral) {
     remove(xmlp);
     rmdir(rep);
     rmdir(tmp);
-    free(tmp);
     PASS();
 }
 
@@ -204,7 +203,6 @@ TEST(ti_ingest_persist_query_list_trace) {
     remove(xmlp);
     rmdir(rep);
     rmdir(tmp);
-    free(tmp);
     PASS();
 }
 
