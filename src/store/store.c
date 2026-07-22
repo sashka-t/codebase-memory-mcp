@@ -2677,6 +2677,80 @@ static char *make_like_hint(const char *literal) {
     return buf;
 }
 
+/* Translate a shell-style glob into a POSIX ERE regex, but ONLY when `pattern`
+ * looks like a glob rather than a regex. name_pattern / qn_pattern are matched
+ * with iregexp (POSIX ERE), so a caller's intuitive "*Submit*" is a malformed
+ * regex (a leading '*' is a quantifier with no atom) that silently matches
+ * nothing — search_graph then returns {"total":0} and the index looks dead
+ * (codebase-memory-issues 2.md, 2026-07-22 16:05).
+ *
+ * Heuristic: if the pattern contains any regex metacharacter that globs don't
+ * use ('.', '+', '(', ')', '[', ']', '{', '}', '|', '\\', '^', '$'), treat it
+ * as a regex and leave it verbatim (so existing regex callers are unaffected,
+ * including (?i)-prefixed patterns, which contain '('). Otherwise, if it has
+ * '*' or '?', translate '*' -> ".*" and '?' -> '.'. A pattern with neither
+ * wildcards nor metacharacters is returned NULL so the plain substring regex
+ * path runs unchanged.
+ *
+ * Returns a malloc'd regex string (caller owns it) or NULL to use `pattern`
+ * verbatim. */
+static char *glob_to_regex_if_glob(const char *pattern) {
+    if (!pattern || !pattern[0]) {
+        return NULL;
+    }
+    bool has_wildcard = false;
+    for (const char *p = pattern; *p; p++) {
+        char c = *p;
+        if (c == '*' || c == '?') {
+            has_wildcard = true;
+            continue;
+        }
+        if (c == '.' || c == '+' || c == '(' || c == ')' || c == '[' || c == ']' || c == '{' ||
+            c == '}' || c == '|' || c == '\\' || c == '^' || c == '$') {
+            return NULL; /* regex metacharacter present → treat the whole pattern as regex */
+        }
+    }
+    if (!has_wildcard) {
+        return NULL; /* plain substring — use verbatim */
+    }
+    /* Worst case every char is '*' -> ".." (two chars). +1 for NUL. */
+    size_t cap = strlen(pattern) * 2 + 1;
+    char *out = malloc(cap);
+    if (!out) {
+        return NULL;
+    }
+    size_t j = 0;
+    for (const char *p = pattern; *p; p++) {
+        if (*p == '*') {
+            out[j++] = '.';
+            out[j++] = '*';
+        } else if (*p == '?') {
+            out[j++] = '.';
+        } else {
+            out[j++] = *p;
+        }
+    }
+    out[j] = '\0';
+    return out;
+}
+
+/* Resolve a name/qn pattern to the string that should be bound for iregexp:
+ * the glob-translated regex when `pattern` is a glob (owned by `pool` so it
+ * outlives statement execution), or `pattern` verbatim. `pool` must be non-NULL
+ * so the translated string is freed after the search. */
+static const char *resolve_pattern_regex(const char *pattern, search_like_pool_t *pool) {
+    char *re = glob_to_regex_if_glob(pattern);
+    if (!re) {
+        return pattern;
+    }
+    if (pool && pool->count < ST_LIKE_POOL_MAX) {
+        like_pool_add(pool, re); /* pool owns it now — freed after execution */
+        return re;
+    }
+    free(re); /* pool full — degrade to verbatim regex rather than risk a dangling bind */
+    return pattern;
+}
+
 static void search_apply_degree_filter(char *sql, size_t sql_sz, const cbm_search_params_t *p) {
     bool has_degree_filter = (p->min_degree >= 0 || p->max_degree >= 0);
     if (!has_degree_filter) {
@@ -2794,16 +2868,18 @@ static int search_where_basic(const cbm_search_params_t *params, char *where, in
         where_bind_text(binds, bind_idx, params->label);
     }
     if (params->name_pattern) {
-        where_add_like_hints("n.name", params->name_pattern, where, where_sz, wlen, nparams, binds,
+        const char *name_pat = resolve_pattern_regex(params->name_pattern, pool);
+        where_add_like_hints("n.name", name_pat, where, where_sz, wlen, nparams, binds,
                              bind_idx, pool);
         where_add_regex(where, where_sz, wlen, nparams, binds, bind_idx, "n.name",
-                        params->name_pattern, params->case_sensitive);
+                        name_pat, params->case_sensitive);
     }
     if (params->qn_pattern) {
-        where_add_like_hints("n.qualified_name", params->qn_pattern, where, where_sz, wlen, nparams,
+        const char *qn_pat = resolve_pattern_regex(params->qn_pattern, pool);
+        where_add_like_hints("n.qualified_name", qn_pat, where, where_sz, wlen, nparams,
                              binds, bind_idx, pool);
         where_add_regex(where, where_sz, wlen, nparams, binds, bind_idx, "n.qualified_name",
-                        params->qn_pattern, params->case_sensitive);
+                        qn_pat, params->case_sensitive);
     }
     if (params->file_pattern) {
         char *lp = cbm_glob_to_like(params->file_pattern);

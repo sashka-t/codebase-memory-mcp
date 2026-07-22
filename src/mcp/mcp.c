@@ -359,7 +359,8 @@ static const tool_def_t TOOLS[] = {
      "OF grep/glob when finding code definitions, implementations, or relationships. Three search "
      "modes: (1) query='update settings' for BM25 ranked full-text search with camelCase "
      "splitting and structural label boosting — recommended for natural-language discovery; "
-     "(2) name_pattern='.*regex.*' for exact pattern matching; (3) semantic_query=[...] for "
+     "(2) name_pattern='.*regex.*' (or a shell glob like '*Service*') for exact "
+     "pattern matching; (3) semantic_query=[...] for "
      "vector cosine search that bridges vocabulary (finds 'publish' when you search 'send'). "
      "The three modes are independent and can be combined in a single call. "
      "PAGINATION: results are capped at limit (default 200) — broader queries are silently "
@@ -374,8 +375,13 @@ static const tool_def_t TOOLS[] = {
      "ranked with structural boosting: Functions/Methods +10, Routes +8, Classes/Interfaces +5. "
      "Noise labels (File/Folder/Module/Variable) are filtered out. When provided, name_pattern "
      "is ignored.\"},"
-     "\"label\":{\"type\":\"string\"},\"name_pattern\":{\"type\":\"string\"},\"qn_pattern\":{"
-     "\"type\":\"string\"},\"file_pattern\":{\"type\":\"string\"},"
+     "\"label\":{\"type\":\"string\"},\"name_pattern\":{\"type\":\"string\",\"description\":\"POSIX "
+     "extended regex matched against node names (unanchored substring match). Shell globs are also "
+     "accepted: '*Service*' and 'Service*' are translated to '.*Service.*' and 'Service.*' so the "
+     "common wildcard form works instead of silently returning zero results. A pattern containing "
+     "any regex metacharacter (e.g. '.', '(', '[') is treated as a regex verbatim.\"},\"qn_pattern\":{"
+     "\"type\":\"string\",\"description\":\"Same semantics as name_pattern, matched against the "
+     "qualified_name.\"},\"file_pattern\":{\"type\":\"string\"},"
      "\"relationship\":{\"type\":\"string\"},\"min_degree\":{\"type\":\"integer\"},"
      "\"max_degree\":{\"type\":\"integer\"},\"exclude_entry_points\":{\"type\":\"boolean\"},"
      "\"include_connected\":{\"type\":\"boolean\"},\"semantic_query\":{"
@@ -2255,7 +2261,8 @@ static char *handle_search_graph(cbm_mcp_server_t *srv, const char *args) {
         } else if (name_pattern) {
             yyjson_mut_obj_add_str(
                 doc, root, "hint",
-                "No nodes match this pattern. Check spelling or try a broader regex.");
+                "No nodes match this pattern. Check spelling, try a broader regex, or use a shell "
+                "glob like '*name*' (which is also accepted).");
         } else if (label) {
             yyjson_mut_obj_add_str(
                 doc, root, "hint",

@@ -86,6 +86,74 @@ TEST(store_search_by_name_pattern) {
     PASS();
 }
 
+/* ── Glob-style name_pattern is accepted (issue from codebase-memory-issues 2.md, 2026-07-22 16:05) ──
+ *
+ * name_pattern is documented as a regex, but callers naturally pass shell
+ * globs like "*Submit*" (the same wildcard file_pattern accepts). A leading
+ * unanchored '*' is a meaningless POSIX ERE quantifier, so the raw pattern
+ * silently matched nothing — search_graph returned {"total":0} and the user
+ * concluded the index was corrupt. Fix: when the pattern looks like a glob
+ * (contains '*' or '?' but no regex metacharacters), translate it to a regex.
+ */
+TEST(store_search_name_pattern_accepts_glob) {
+    int64_t ids[3];
+    cbm_store_t *s = setup_search_store(ids);
+
+    /* glob with leading+trailing '*' — the exact shape from the issue log */
+    cbm_search_params_t glob = {
+        .project = "test", .name_pattern = "*Submit*", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out = {0};
+    int rc = cbm_store_search(s, &glob, &out);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out.count, 1);
+    ASSERT_STR_EQ(out.results[0].node.name, "SubmitOrder");
+    cbm_store_search_free(&out);
+
+    /* glob with only a trailing '*' (prefix match) */
+    cbm_search_params_t prefix = {
+        .project = "test", .name_pattern = "Submit*", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out2 = {0};
+    rc = cbm_store_search(s, &prefix, &out2);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out2.count, 1);
+    ASSERT_STR_EQ(out2.results[0].node.name, "SubmitOrder");
+    cbm_store_search_free(&out2);
+
+    /* glob with only a leading '*' (suffix/contains match). iregexp is an
+     * unanchored substring match, so "*Order" -> ".*Order" matches every name
+     * that CONTAINS "Order": SubmitOrder, ProcessOrder, OrderService. */
+    cbm_search_params_t suffix = {
+        .project = "test", .name_pattern = "*Order", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out3 = {0};
+    rc = cbm_store_search(s, &suffix, &out3);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out3.count, 3);
+    cbm_store_search_free(&out3);
+
+    /* single-char '?' wildcard */
+    cbm_search_params_t q = {
+        .project = "test", .name_pattern = "Submit?rder", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out4 = {0};
+    rc = cbm_store_search(s, &q, &out4);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out4.count, 1);
+    ASSERT_STR_EQ(out4.results[0].node.name, "SubmitOrder");
+    cbm_store_search_free(&out4);
+
+    /* a real regex is still honored unchanged (contains '.', a regex metachar) */
+    cbm_search_params_t regex = {
+        .project = "test", .name_pattern = ".*Submit.*", .min_degree = -1, .max_degree = -1};
+    cbm_search_output_t out5 = {0};
+    rc = cbm_store_search(s, &regex, &out5);
+    ASSERT_EQ(rc, CBM_STORE_OK);
+    ASSERT_EQ(out5.count, 1);
+    ASSERT_STR_EQ(out5.results[0].node.name, "SubmitOrder");
+    cbm_store_search_free(&out5);
+
+    cbm_store_close(s);
+    PASS();
+}
+
 /* ── Empty-string label is ignored (issue #481) ────────────────── */
 
 /* An empty-string label must behave like an omitted label (no filter), not be
@@ -1461,6 +1529,7 @@ TEST(store_impact_summary_empty) {
 SUITE(store_search) {
     RUN_TEST(store_search_by_label);
     RUN_TEST(store_search_by_name_pattern);
+    RUN_TEST(store_search_name_pattern_accepts_glob);
     RUN_TEST(store_search_empty_label_ignored);
     RUN_TEST(store_search_by_file_pattern);
     RUN_TEST(store_search_file_pattern_substring_issue200);
