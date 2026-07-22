@@ -1626,10 +1626,17 @@ static void remap_sort_dedup_vectors(cbm_gbuf_t *gb, const int64_t *temp_to_fina
         int64_t old_id = gb->dump_vectors[i].node_id;
         int64_t new_id = (old_id > 0 && old_id < max_temp_id) ? temp_to_final[old_id] : 0;
         if (new_id > 0) {
-            gb->dump_vectors[remapped] = gb->dump_vectors[i];
+            if (remapped != i) {
+                gb->dump_vectors[remapped] = gb->dump_vectors[i];
+            }
             gb->dump_vectors[remapped].node_id = new_id;
             remapped++;
         } else {
+            /* Dropped: the gbuf no longer references this vector after
+             * compaction, so free its buffer now — cbm_gbuf_free only walks
+             * [0, dump_vector_count) and would otherwise leak it. */
+            free((void *)gb->dump_vectors[i].vector);
+            gb->dump_vectors[i].vector = NULL;
             dropped++;
         }
     }
@@ -1649,9 +1656,16 @@ static void remap_sort_dedup_vectors(cbm_gbuf_t *gb, const int64_t *temp_to_fina
         for (int i = 0; i < gb->dump_vector_count; i++) {
             if (i + GB_DEDUP_LOOKAHEAD < gb->dump_vector_count &&
                 gb->dump_vectors[i].node_id == gb->dump_vectors[i + GB_DEDUP_LOOKAHEAD].node_id) {
+                /* Duplicate: drop this vector's buffer now so it doesn't leak
+                 * when dump_vector_count shrinks below this index. */
+                free((void *)gb->dump_vectors[i].vector);
+                gb->dump_vectors[i].vector = NULL;
                 continue;
             }
-            gb->dump_vectors[deduped++] = gb->dump_vectors[i];
+            if (deduped != i) {
+                gb->dump_vectors[deduped] = gb->dump_vectors[i];
+            }
+            deduped++;
         }
         gb->dump_vector_count = deduped;
     }
